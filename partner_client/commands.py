@@ -59,6 +59,12 @@ class CommandRouter:
         lines = ["Available slash commands:", ""]
         for name, (desc, _) in self._commands.items():
             lines.append(f"  {name:<18}  {desc}")
+        lines.append("")
+        lines.append("Input directives (modify the message, not the client):")
+        lines.append("")
+        lines.append("  :image <path> [text]   Attach an image to the next message.")
+        lines.append("                         Path may be quoted with \" or '.")
+        lines.append("                         Multiple :image directives can be chained.")
         return CommandResult(output="\n".join(lines))
 
     def _cmd_checkpoint(self, arg: str) -> CommandResult:

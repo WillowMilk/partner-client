@@ -14,6 +14,7 @@ from pathlib import Path
 from .client import OllamaClient
 from .commands import CommandRouter
 from .config import Config, ConfigError, load_config
+from .directives import parse_input
 from .memory import Memory
 from .session import Session
 from .tools import ToolRegistry
@@ -114,8 +115,32 @@ def _run(config: Config) -> int:
                     ui.show_error(f"Config reload failed: {e}")
             continue
 
+        # Parse input for directives (e.g. :image <path>)
+        parsed = parse_input(text)
+        images_bytes: list[bytes] = []
+        for img_path in parsed.image_paths:
+            if not img_path.is_file():
+                ui.show_error(f"Image not found: {img_path}")
+                images_bytes = []
+                break
+            try:
+                images_bytes.append(img_path.read_bytes())
+                ui.show_image_attached(str(img_path), img_path.stat().st_size)
+            except OSError as e:
+                ui.show_error(f"Error reading image {img_path}: {e}")
+                images_bytes = []
+                break
+        if parsed.image_paths and not images_bytes:
+            # Image was specified but failed to load — abort the turn
+            continue
+
+        # If only a directive was given (no text), provide a default prompt
+        message_text = parsed.text or ("What do you see?" if images_bytes else "")
+        if not message_text:
+            continue
+
         # Real conversation turn
-        session.append_user(text)
+        session.append_user(message_text, images=images_bytes if images_bytes else None)
 
         try:
             response = client.chat(

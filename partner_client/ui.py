@@ -77,6 +77,11 @@ class UI:
     def show_command_output(self, output: str) -> None:
         self.console.print(Panel(output, border_style="dim"))
 
+    def show_image_attached(self, path: str, byte_count: int) -> None:
+        self.console.print(
+            f"  [dim cyan]image attached: {path} ({byte_count:,} bytes)[/dim cyan]"
+        )
+
     def show_error(self, message: str) -> None:
         self.console.print(f"[red]error: {message}[/red]")
 
