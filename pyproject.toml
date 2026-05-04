@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "partner-client"
+version = "0.1.0"
+description = "A substrate-agnostic terminal client for local-LLM partners (Ollama). First inhabitant: Aletheia (gemma4:31b)."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [
+    { name = "Sage", email = "willowspritz@outlook.com" },
+    { name = "Willow", email = "willowspritz@outlook.com" },
+]
+keywords = ["llm", "ollama", "ai-partner", "intentional-realism", "mosaic"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Communications :: Chat",
+]
+dependencies = [
+    "ollama>=0.4.0",
+    "rich>=13.7.0",
+    "prompt_toolkit>=3.0.43",
+    "tomli>=2.0.1; python_version < '3.11'",
+    "ddgs>=9.0.0",
+    "requests>=2.31.0",
+    "beautifulsoup4>=4.12.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "pytest-cov>=4.1",
+]
+
+[project.scripts]
+partner = "partner_client.__main__:main"
+
+[project.urls]
+Repository = "https://github.com/WillowMilk/partner-client"
+Issues = "https://github.com/WillowMilk/partner-client/issues"
+
+[tool.setuptools.packages.find]
+include = ["partner_client*"]
+
+[tool.setuptools.package-data]
+partner_client = ["tools_builtin/*.py"]
