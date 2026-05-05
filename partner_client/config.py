@@ -85,6 +85,16 @@ class UIConfig:
 
 
 @dataclass
+class HubConfig:
+    """Optional Agent Messaging Hub configuration.
+
+    When present, enables hub_send/hub_check_inbox/hub_read_letter tools.
+    """
+    path: str = ""  # absolute path to the Hub directory; empty disables Hub tools
+    partner_name: str = ""  # this partner's inbox name (e.g. "aletheia")
+
+
+@dataclass
 class LoggingConfig:
     level: str = "INFO"
     log_file: str = "Memory/.client-log.jsonl"
@@ -100,6 +110,7 @@ class Config:
     ui: UIConfig
     logging: LoggingConfig
     config_path: Path  # the path the config was loaded from
+    hub: HubConfig = field(default_factory=HubConfig)
 
     @property
     def home_dir(self) -> Path:
@@ -166,6 +177,7 @@ def load_config(path: str | Path) -> Config:
 
     ui = UIConfig(**_filter_known_fields(data.get("ui", {}), UIConfig))
     logging = LoggingConfig(**_filter_known_fields(data.get("logging", {}), LoggingConfig))
+    hub = HubConfig(**_filter_known_fields(data.get("hub", {}), HubConfig))
 
     return Config(
         identity=identity,
@@ -176,6 +188,7 @@ def load_config(path: str | Path) -> Config:
         ui=ui,
         logging=logging,
         config_path=config_path,
+        hub=hub,
     )
 
 

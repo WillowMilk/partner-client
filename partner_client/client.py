@@ -70,6 +70,17 @@ def setup_scope_env(config: Config) -> list[dict]:
 
     os.environ["PARTNER_CLIENT_SCOPES"] = json.dumps(all_scopes)
     os.environ["PARTNER_CLIENT_DEFAULT_SCOPE"] = "memory"
+
+    # Hub configuration (for hub_send / hub_check_inbox / hub_read_letter tools)
+    if config.hub.path:
+        os.environ["PARTNER_CLIENT_HUB_DIR"] = config.hub.path
+        os.environ["PARTNER_CLIENT_HUB_PARTNER"] = (
+            config.hub.partner_name or config.identity.name.lower()
+        )
+    else:
+        os.environ.pop("PARTNER_CLIENT_HUB_DIR", None)
+        os.environ.pop("PARTNER_CLIENT_HUB_PARTNER", None)
+
     return all_scopes
 
 
