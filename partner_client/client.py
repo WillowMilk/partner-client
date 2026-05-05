@@ -7,9 +7,11 @@ a 'tool' role message before the next chat invocation.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from .config import Config
@@ -28,6 +30,49 @@ class ChatResponse:
     tool_invocations: list[tuple[str, dict, str]]  # [(name, args, result)]
 
 
+def setup_scope_env(config: Config) -> list[dict]:
+    """Populate PARTNER_CLIENT_* env vars from config so tools can resolve paths.
+
+    Called by both __main__ (early, so wake bundle sees scopes) and the
+    OllamaClient constructor (idempotent re-call). Safe to call repeatedly.
+    Returns the assembled scope list for in-process use.
+    """
+    memory_dir = config.resolve(config.memory.memory_dir)
+    home_dir = config.identity.home_dir
+    os.environ["PARTNER_CLIENT_MEMORY_DIR"] = str(memory_dir)
+
+    all_scopes = [
+        {
+            "name": "memory",
+            "path": str(memory_dir),
+            "mode": "readwrite",
+            "description": "Your home memory directory (default for bare filenames).",
+        },
+        {
+            "name": "home",
+            "path": str(home_dir),
+            "mode": "readwrite",
+            "description": f"Your full home directory ({home_dir}).",
+        },
+    ]
+    for sc in config.tools.scopes:
+        sc_path = sc.path
+        if not Path(sc_path).is_absolute():
+            sc_path = str(home_dir / sc_path)
+        if any(s["name"] == sc.name for s in all_scopes):
+            continue
+        all_scopes.append({
+            "name": sc.name,
+            "path": sc_path,
+            "mode": sc.mode,
+            "description": sc.description,
+        })
+
+    os.environ["PARTNER_CLIENT_SCOPES"] = json.dumps(all_scopes)
+    os.environ["PARTNER_CLIENT_DEFAULT_SCOPE"] = "memory"
+    return all_scopes
+
+
 class OllamaClient:
     def __init__(self, config: Config, tools: ToolRegistry):
         self.config = config
@@ -38,10 +83,12 @@ class OllamaClient:
             raise RuntimeError("The 'ollama' package is required. Run: pip install ollama") from e
         self._ollama = ollama
 
-        # Set memory dir env var so built-in tools can access the partner's memory.
-        os.environ["PARTNER_CLIENT_MEMORY_DIR"] = str(
-            config.resolve(config.memory.memory_dir)
-        )
+        # Set up scope env vars (idempotent if __main__ already did it).
+        self._scopes = setup_scope_env(config)
+
+    @property
+    def scopes(self) -> list[dict]:
+        return self._scopes
 
     def chat(
         self,

@@ -36,7 +36,8 @@ class CommandRouter:
             "/sleep": ("Checkpoint + close the session and exit cleanly.", self._cmd_sleep),
             "/context": ("Show detailed context-usage breakdown.", self._cmd_context),
             "/tools": ("List available tools and their descriptions.", self._cmd_tools),
-            "/files": ("List files in your memory directory.", self._cmd_files),
+            "/files": ("List files in your memory directory (or pass a scope name: /files desktop).", self._cmd_files),
+            "/scopes": ("Show all configured file scopes (memory, home, desktop, etc.).", self._cmd_scopes),
             "/reload-config": ("Re-read aletheia.toml without restart.", self._cmd_reload_config),
         }
 
@@ -63,7 +64,8 @@ class CommandRouter:
         lines.append("Input directives (modify the message, not the client):")
         lines.append("")
         lines.append("  :image <path> [text]   Attach an image to the next message.")
-        lines.append("                         Path may be quoted with \" or '.")
+        lines.append("                         Path may be bare (memory scope), scope-qualified")
+        lines.append("                         (e.g. desktop:photo.jpg), or absolute.")
         lines.append("                         Multiple :image directives can be chained.")
         return CommandResult(output="\n".join(lines))
 
@@ -112,12 +114,22 @@ class CommandRouter:
 
     def _cmd_files(self, arg: str) -> CommandResult:
         from .tools_builtin.list_files import execute as list_files_exec
-        import os
-        os.environ["PARTNER_CLIENT_MEMORY_DIR"] = str(
-            self.config.resolve(self.config.memory.memory_dir)
-        )
-        result = list_files_exec()
-        return CommandResult(output=f"Files in memory:\n{result}")
+        scope = arg.strip() or "memory"
+        result = list_files_exec(scope=scope)
+        return CommandResult(output=result)
+
+    def _cmd_scopes(self, arg: str) -> CommandResult:
+        from .paths import list_scopes
+        scopes = list_scopes()
+        if not scopes:
+            return CommandResult(output="No file scopes configured.")
+        lines = ["Configured file scopes:", ""]
+        for s in scopes:
+            mode_label = "readwrite" if s.mode == "readwrite" else "READ-ONLY"
+            lines.append(f"  {s.name:<14}  ({mode_label})  {s.path}")
+            if s.description:
+                lines.append(f"  {' ':<14}  {s.description}")
+        return CommandResult(output="\n".join(lines))
 
     def _cmd_reload_config(self, arg: str) -> CommandResult:
         return CommandResult(

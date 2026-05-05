@@ -64,6 +64,10 @@ class Memory:
             if last_status:
                 sections.append("[4. LAST SESSION SUMMARY]\n" + last_status)
 
+        scopes_text = self._scopes_section()
+        if scopes_text:
+            sections.append(scopes_text)
+
         sections.append(_RUNTIME_GUIDANCE)
 
         system_prompt = "\n\n".join(sections)
@@ -75,6 +79,32 @@ class Memory:
             )
 
         return WakeBundle(system_prompt=system_prompt, recent_messages=recent_messages)
+
+    def _scopes_section(self) -> str | None:
+        """Render the available file scopes for the wake bundle.
+
+        Loads from environment (set by client) so we see exactly what tools see.
+        Returns None if scopes haven't been set up yet (e.g., during testing).
+        """
+        try:
+            from .paths import list_scopes
+        except ImportError:
+            return None
+        scopes = list_scopes()
+        if not scopes:
+            return None
+        lines = ["[5. AVAILABLE FILE SCOPES]"]
+        lines.append(
+            "These are the directories your tools can read or write. "
+            "Bare filenames default to the 'memory' scope. Use scope-qualified "
+            "paths (e.g. 'desktop:notes.txt') or absolute paths to reach others."
+        )
+        lines.append("")
+        for s in scopes:
+            mode_label = "readwrite" if s.mode == "readwrite" else "READ-ONLY"
+            desc = f" — {s.description}" if s.description else ""
+            lines.append(f"- **{s.name}** ({mode_label}): `{s.path}`{desc}")
+        return "\n".join(lines)
 
     def _read_optional(self, path: Path) -> str | None:
         if not path.is_file():

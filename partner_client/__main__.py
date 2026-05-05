@@ -11,14 +11,25 @@ import logging
 import sys
 from pathlib import Path
 
-from .client import OllamaClient
+import re
+
+from .client import OllamaClient, setup_scope_env
 from .commands import CommandRouter
 from .config import Config, ConfigError, load_config
 from .directives import parse_input
 from .memory import Memory
+from .paths import PathError, resolve_path
 from .session import Session
 from .tools import ToolRegistry
 from .ui import UI
+
+
+# Detect plausible image paths in plain text (for the no-directive hint).
+# Matches absolute Unix paths and Windows paths ending in image extensions.
+_IMAGE_PATH_HINT_RE = re.compile(
+    r"((?:/|[A-Za-z]:[\\/])[^\s'\"]+\.(?:jpe?g|png|gif|webp|bmp|tiff?))",
+    re.IGNORECASE,
+)
 
 
 def main() -> int:
@@ -53,6 +64,9 @@ def main() -> int:
 
 
 def _run(config: Config) -> int:
+    # Set up scope env vars EARLY so the wake bundle's scope-listing renders.
+    setup_scope_env(config)
+
     memory = Memory(config)
     tools = ToolRegistry(config)
     tools.discover()
@@ -119,20 +133,38 @@ def _run(config: Config) -> int:
         parsed = parse_input(text)
         images_bytes: list[bytes] = []
         for img_path in parsed.image_paths:
-            if not img_path.is_file():
-                ui.show_error(f"Image not found: {img_path}")
+            # Resolve through scope system (supports bare/scope-qualified/absolute)
+            try:
+                resolved = resolve_path(str(img_path), write=False)
+            except PathError as e:
+                ui.show_error(f"Image scope error: {e}")
+                images_bytes = []
+                break
+            if not resolved.is_file():
+                ui.show_error(f"Image not found: {resolved}")
                 images_bytes = []
                 break
             try:
-                images_bytes.append(img_path.read_bytes())
-                ui.show_image_attached(str(img_path), img_path.stat().st_size)
+                images_bytes.append(resolved.read_bytes())
+                ui.show_image_attached(str(resolved), resolved.stat().st_size)
             except OSError as e:
-                ui.show_error(f"Error reading image {img_path}: {e}")
+                ui.show_error(f"Error reading image {resolved}: {e}")
                 images_bytes = []
                 break
         if parsed.image_paths and not images_bytes:
             # Image was specified but failed to load — abort the turn
             continue
+
+        # No-directive hint: if there are no images attached but the message
+        # text contains what looks like an image path, suggest the directive.
+        if not images_bytes:
+            hint_match = _IMAGE_PATH_HINT_RE.search(parsed.text)
+            if hint_match:
+                ui.show_command_output(
+                    f"hint: did you mean `:image {hint_match.group(1)}`? "
+                    f"(image path detected without the :image directive — "
+                    f"image not attached)"
+                )
 
         # If only a directive was given (no text), provide a default prompt
         message_text = parsed.text or ("What do you see?" if images_bytes else "")

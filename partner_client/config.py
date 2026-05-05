@@ -56,12 +56,23 @@ class WakeBundleConfig:
 
 
 @dataclass
+class ScopeConfig:
+    """A user-configured filesystem scope from [[tool_paths]] in aletheia.toml."""
+    name: str
+    path: str  # may be relative to home_dir, or absolute
+    mode: str = "readwrite"  # "read" or "readwrite"
+    description: str = ""
+
+
+@dataclass
 class ToolsConfig:
     enabled: list[str] = field(default_factory=lambda: [
         "read_file", "write_file", "list_files",
         "search_web", "fetch_page", "weather",
     ])
     external_tools_dir: str = "tools"
+    scopes: list[ScopeConfig] = field(default_factory=list)
+    # Deprecated, retained for back-compat:
     allow_external_reads: list[str] = field(default_factory=list)
 
 
@@ -134,7 +145,25 @@ def load_config(path: str | Path) -> Config:
     model = ModelConfig(**_filter_known_fields(data.get("model", {}), ModelConfig))
     memory = MemoryConfig(**_filter_known_fields(data.get("memory", {}), MemoryConfig))
     wake_bundle = WakeBundleConfig(**_filter_known_fields(data.get("wake_bundle", {}), WakeBundleConfig))
-    tools = ToolsConfig(**_filter_known_fields(data.get("tools", {}), ToolsConfig))
+
+    tools_raw = data.get("tools", {})
+    tools = ToolsConfig(**_filter_known_fields(tools_raw, ToolsConfig))
+    # Parse [[tool_paths]] (TOML array-of-tables) into ScopeConfig list
+    raw_scopes = data.get("tool_paths", [])
+    if isinstance(raw_scopes, list):
+        for raw in raw_scopes:
+            if not isinstance(raw, dict):
+                continue
+            try:
+                tools.scopes.append(ScopeConfig(
+                    name=raw["name"],
+                    path=raw["path"],
+                    mode=raw.get("mode", "readwrite"),
+                    description=raw.get("description", ""),
+                ))
+            except KeyError:
+                continue
+
     ui = UIConfig(**_filter_known_fields(data.get("ui", {}), UIConfig))
     logging = LoggingConfig(**_filter_known_fields(data.get("logging", {}), LoggingConfig))
 
