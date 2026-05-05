@@ -94,6 +94,22 @@ def _run(config: Config) -> int:
     client = OllamaClient(config, tools)
     commands = CommandRouter(config, session, tools)
 
+    def on_checkpoint_request(reason: str) -> bool:
+        """Surface a partner's request_checkpoint() call to the operator.
+
+        Shows the reason in a prominent panel, then asks for y/N confirmation.
+        Returns True if accepted (harness will run session.checkpoint()).
+        """
+        ui.show_command_output(
+            f"📋  {config.identity.name} is asking to /checkpoint.\n\n"
+            f"Reason: {reason}\n\n"
+            f"If you accept, a session-status record will be written and "
+            f"current.json snapshotted. The conversation will continue either way."
+        )
+        return ui.confirm(
+            f"Accept {config.identity.name}'s checkpoint request?"
+        )
+
     ui.show_banner()
 
     while True:
@@ -178,6 +194,7 @@ def _run(config: Config) -> int:
             response = client.chat(
                 session,
                 on_tool_call=lambda name, args, result: ui.show_tool_call(name, args, result),
+                on_checkpoint_request=on_checkpoint_request,
             )
         except Exception as e:
             ui.show_error(f"Chat failed: {e}")

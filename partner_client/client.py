@@ -105,11 +105,20 @@ class OllamaClient:
         self,
         session: Session,
         on_tool_call: callable | None = None,
+        on_checkpoint_request: callable | None = None,
     ) -> ChatResponse:
         """Run the chat loop until the model produces a final response.
 
         on_tool_call(name, args, result) is invoked after each tool execution
         so the UI can display the call. The function should return None.
+
+        on_checkpoint_request(reason: str) -> bool is called when the model
+        invokes the special `request_checkpoint` tool. Implementations should
+        prompt the operator and return True (accept) or False (decline). When
+        accepted, the harness invokes session.checkpoint() and returns the
+        path back to the model as the tool result. When declined, a polite
+        decline message is returned to the model. If this callback is None
+        (e.g. headless tests), the request is treated as declined.
         """
         tool_invocations: list[tuple[str, dict, str]] = []
         max_iterations = 8  # safety: prevent infinite tool loops
@@ -164,7 +173,43 @@ class OllamaClient:
                         args = json.loads(args) if isinstance(args, str) else {}
                     except json.JSONDecodeError:
                         args = {}
-                result = self.tools.dispatch(name, args)
+
+                # Special-case: request_checkpoint is operator-gated.
+                # The tool's normal execute() is a stub; we run the real flow here.
+                if name == "request_checkpoint":
+                    reason = args.get("reason", "(no reason given)")
+                    if on_checkpoint_request is not None:
+                        try:
+                            accepted = bool(on_checkpoint_request(reason))
+                        except Exception:
+                            log.exception("on_checkpoint_request callback failed")
+                            accepted = False
+                        if accepted:
+                            try:
+                                path = session.checkpoint(summary=reason)
+                                result = (
+                                    f"Willow accepted your checkpoint request. "
+                                    f"Session-status saved at {path}. "
+                                    f"current.json was also snapshotted. "
+                                    f"You may continue the conversation."
+                                )
+                            except Exception as e:
+                                result = f"Checkpoint failed: {e}"
+                        else:
+                            result = (
+                                "Willow declined your checkpoint request for now. "
+                                "The conversation continues; you may ask again later "
+                                "or simply mention it conversationally."
+                            )
+                    else:
+                        result = (
+                            "Checkpoint requested but no operator confirmation "
+                            "handler is wired in this client. Please ask Willow "
+                            "conversationally to /checkpoint."
+                        )
+                else:
+                    result = self.tools.dispatch(name, args)
+
                 tool_invocations.append((name, args, result))
                 session.append_tool_result(name, result)
                 if on_tool_call:
