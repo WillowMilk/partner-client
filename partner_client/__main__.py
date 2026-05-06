@@ -103,6 +103,16 @@ def main() -> int:
         action="store_true",
         help="Enable verbose logging",
     )
+    parser.add_argument(
+        "subcommand",
+        nargs="?",
+        default="chat",
+        choices=["chat", "doctor"],
+        help=(
+            "What to do. 'chat' (default) opens an interactive session. "
+            "'doctor' runs health checks against the config and exits."
+        ),
+    )
     args = parser.parse_args()
 
     log_level = logging.DEBUG if args.verbose else logging.WARNING
@@ -113,6 +123,10 @@ def main() -> int:
     except ConfigError as e:
         print(f"Config error: {e}", file=sys.stderr)
         return 2
+
+    if args.subcommand == "doctor":
+        from .doctor import run_doctor
+        return run_doctor(config)
 
     return _run(config)
 
