@@ -28,11 +28,22 @@ from .ui import UI
 
 # Detect plausible image paths in plain text for implicit auto-attachment.
 # Matches absolute Unix paths, tilde-prefixed paths, and Windows paths ending
-# in known image extensions. Scope-qualified forms (e.g. "memory:foo.jpg")
-# are not matched here — those flow through the explicit :image directive.
+# in known image extensions. Three alternatives, in order:
+#   1. Single-quoted path (allows spaces inside the quotes)
+#   2. Double-quoted path (allows spaces inside the quotes)
+#   3. Bare path (no spaces, no quotes)
+# Each alternative captures the bare path text without surrounding quotes.
+# Scope-qualified forms (e.g. "memory:foo.jpg") are not matched here —
+# those flow through the explicit :image directive.
 _IMAGE_PATH_AUTO_RE = re.compile(
-    r"((?:~|/|[A-Za-z]:[\\/])[^\s'\"]+\.(?:jpe?g|png|gif|webp|bmp|tiff?|heic))",
-    re.IGNORECASE,
+    r"""
+    '(?P<sq>(?:~|/|[A-Za-z]:[\\/])[^']+\.(?:jpe?g|png|gif|webp|bmp|tiff?|heic))'
+    |
+    "(?P<dq>(?:~|/|[A-Za-z]:[\\/])[^"]+\.(?:jpe?g|png|gif|webp|bmp|tiff?|heic))"
+    |
+    (?P<bare>(?:~|/|[A-Za-z]:[\\/])[^\s'"]+\.(?:jpe?g|png|gif|webp|bmp|tiff?|heic))
+    """,
+    re.IGNORECASE | re.VERBOSE,
 )
 
 _IMAGE_EXTENSIONS = {
@@ -251,11 +262,21 @@ def _run(config: Config) -> int:
         if not images_bytes:
             seen_paths: set[Path] = set()
             for match in _IMAGE_PATH_AUTO_RE.finditer(parsed.text):
-                candidate_str = match.group(1)
+                candidate_str = match.group("sq") or match.group("dq") or match.group("bare")
+                if not candidate_str:
+                    continue
+                out_of_scope = False
                 try:
                     candidate = resolve_path(candidate_str, write=False)
                 except PathError:
-                    continue
+                    # Out of scope — but the user typed the path explicitly,
+                    # which is consent for *this* path (matches :image directive
+                    # behavior). Resolve directly and attach with a teaching notice.
+                    try:
+                        candidate = Path(candidate_str).expanduser().resolve(strict=False)
+                    except (OSError, RuntimeError):
+                        continue
+                    out_of_scope = True
                 if candidate in seen_paths:
                     continue
                 if not candidate.is_file() or not _is_image_extension(candidate):
@@ -267,6 +288,12 @@ def _run(config: Config) -> int:
                 images_bytes.append(data)
                 seen_paths.add(candidate)
                 ui.show_image_attached(str(candidate), candidate.stat().st_size, image_bytes=data)
+                if out_of_scope:
+                    ui.show_command_output(
+                        f"Note: '{candidate}' is outside your configured scopes. "
+                        "Attached anyway because you typed the path explicitly. "
+                        "Add a [[tool_paths]] entry in your TOML to silence this notice."
+                    )
 
         # If only a directive was given (no text), provide a default prompt
         message_text = parsed.text or ("What do you see?" if images_bytes else "")
