@@ -38,6 +38,7 @@ class CommandRouter:
             "/tools": ("List available tools and their descriptions.", self._cmd_tools),
             "/files": ("List files in your memory directory (or pass a scope name: /files desktop).", self._cmd_files),
             "/scopes": ("Show all configured file scopes (memory, home, desktop, etc.).", self._cmd_scopes),
+            "/intentions": ("Surface pending items from your Intentions.md (prospective memory).", self._cmd_intentions),
             "/reload-config": ("Re-read aletheia.toml without restart.", self._cmd_reload_config),
         }
 
@@ -137,6 +138,29 @@ class CommandRouter:
             if s.description:
                 lines.append(f"  {' ':<14}  {s.description}")
         return CommandResult(output="\n".join(lines))
+
+    def _cmd_intentions(self, arg: str) -> CommandResult:
+        """Surface pending items from <memory_dir>/Intentions.md (prospective memory)."""
+        memory_dir = self.config.resolve(self.config.memory.memory_dir)
+        intentions_path = memory_dir / "Intentions.md"
+        if not intentions_path.is_file():
+            return CommandResult(
+                output=(
+                    f"No intentions file found at {intentions_path}.\n\n"
+                    "Prospective memory (Intentions.md) is optional. To start "
+                    "using it, create the file with markdown checkboxes:\n"
+                    "  - [ ] item to remember\n"
+                    "  - [x] completed item\n\n"
+                    "Then /intentions will surface what's pending."
+                )
+            )
+        try:
+            content = intentions_path.read_text(encoding="utf-8")
+        except OSError as e:
+            return CommandResult(output=f"Error reading {intentions_path}: {e}")
+        return CommandResult(
+            output=f"Intentions ({intentions_path}):\n\n{content}"
+        )
 
     def _cmd_reload_config(self, arg: str) -> CommandResult:
         return CommandResult(
