@@ -49,9 +49,12 @@ profile_files = ["Identity-and-Evolution.md"]
 [model]
 provider = "ollama"
 name = "gemma4:31b"
-num_ctx = 262144
+num_ctx = 131072         # 128K — gemma's well-trained range; 256K is RoPE-extrapolation territory
 temperature = 1.0
-keep_alive = "24h"   # 128GB unified memory: keep gemma resident, no cold-load between idle
+repeat_penalty = 1.15    # default 1.1 lets gemma loop on parenthetical/stage-direction prompts
+repeat_last_n = 256      # look further back than the default 64 to catch multi-line loops
+num_predict = 8192       # soft cap per turn — prevents runaway loops if sampling escapes
+keep_alive = "24h"       # 128GB unified memory: keep gemma resident, no cold-load between idle
 
 [memory]
 memory_dir = "Memory"
@@ -91,6 +94,7 @@ external_tools_dir = "tools"
 show_thinking = false
 show_context_bar = true
 warn_at_context_pct = 80
+multiline = false        # set true to enable multi-line input (Enter newline, Esc-Enter submits)
 ```
 
 ## Run
@@ -101,9 +105,14 @@ partner --config /path/to/aletheia.toml
 
 ## Status
 
-v0.4.0 — alpha. See [`v0.1-spec.md`](./v0.1-spec.md) for the foundational architecture spec.
+v0.4.1 — alpha. See [`v0.1-spec.md`](./v0.1-spec.md) for the foundational architecture spec.
 
 **Version history:**
+- **v0.4.1** — Hotfix on top of v0.4.0:
+    - `num_ctx` default 262144 → 131072 (128K is gemma's well-trained range; 256K extrapolation degrades attention precision and increases sampling-loop tendency)
+    - New sampling defenses: `repeat_penalty=1.15`, `repeat_last_n=256`, `num_predict=8192` (soft cap per turn)
+    - `ui.multiline` default reverted to `false` (Esc-Enter discoverability was too high a tax for daily use); opt-in via TOML for power users
+    - All three diagnoses driven by observed real-session symptoms: multi-line stage-direction loops at 155K populated context, generations taking 10-30 minutes per turn
 - **v0.4.0** — Major overhaul:
     - Streaming responses (token-by-token render with Ctrl-C cancel)
     - Atomic session writes (`os.replace`) — crash-safe `current.json`

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "partner-client"
-version = "0.4.0"
+version = "0.4.1"
 description = "A substrate-agnostic terminal client for local-LLM partners (Ollama). First inhabitant: Aletheia (gemma4:31b)."
 readme = "README.md"
 requires-python = ">=3.11"

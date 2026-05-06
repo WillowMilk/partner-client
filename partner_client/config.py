@@ -32,10 +32,21 @@ class IdentityConfig:
 class ModelConfig:
     provider: str = "ollama"
     name: str = "gemma4:31b"
-    num_ctx: int = 32768
+    # 128K is gemma's well-trained range. Pushing to 256K via RoPE extrapolation
+    # degrades attention precision and increases sampling-loop tendency — the
+    # 155K-drowning failure mode we observed on 2026-05-06. Stay in-range by
+    # default; users can override per-config if they accept the trade-off.
+    num_ctx: int = 131072
     temperature: float = 1.0
     top_k: int = 64
     top_p: float = 0.95
+    # Sampling defenses against repetition loops at long context.
+    # Ollama defaults: repeat_penalty=1.1 (light for gemma+long-context),
+    # repeat_last_n=64 (too narrow for multi-line stage-direction loops),
+    # num_predict=-1 (unbounded — no safety cap on runaway generation).
+    repeat_penalty: float = 1.15
+    repeat_last_n: int = 256
+    num_predict: int = 8192  # soft cap per turn; legitimate long replies fit comfortably
     keep_alive: str = "24h"  # 128GB unified memory: keep gemma resident, no cold-load between idle
 
 
@@ -85,6 +96,9 @@ class UIConfig:
     show_context_bar: bool = True
     warn_at_context_pct: int = 80
     theme: str = "warm"
+    # Multi-line input default off — Esc-Enter-to-submit is too discoverable-only
+    # for daily use. Enable via `ui.multiline = true` in TOML if you want it.
+    multiline: bool = False
 
 
 @dataclass

@@ -68,12 +68,13 @@ class UI:
         self.session = session
         self.console = Console()
         history_path = config.resolve(config.memory.memory_dir) / ".prompt-history"
-        # Multi-line input: Enter inserts newline, Esc-Enter submits.
-        # See banner for the user-facing reminder.
+        # Multi-line input is opt-in via [ui] multiline = true. Default is off:
+        # plain Enter submits, which matches daily-chat expectation. When on,
+        # Enter inserts newline and Esc-Enter submits.
         kb = KeyBindings()
         self._prompt_session = PromptSession(
             history=FileHistory(str(history_path)),
-            multiline=True,
+            multiline=bool(config.ui.multiline),
             key_bindings=kb,
         )
         # Streaming state
@@ -87,10 +88,13 @@ class UI:
         self.console.print(
             "[dim]Type /help for commands. /sleep to end the session cleanly.[/dim]"
         )
-        self.console.print(
-            "[dim]Multi-line: Enter inserts a newline; "
-            "[bold]Esc-Enter[/bold] submits.[/dim]\n"
-        )
+        if self.config.ui.multiline:
+            self.console.print(
+                "[dim]Multi-line: Enter inserts a newline; "
+                "[bold]Esc-Enter[/bold] submits.[/dim]\n"
+            )
+        else:
+            self.console.print()
 
     # -------- streaming protocol --------
 
