@@ -178,6 +178,25 @@ def _run(config: Config) -> int:
             f"Accept {config.identity.name}'s checkpoint request?"
         )
 
+    def on_plan_approval_request(summary: str, plan: list[str]) -> bool:
+        """Surface a partner's request_plan_approval() call to the operator.
+
+        Shows the plan summary + numbered steps, then asks for y/N.
+        Returns True if approved (the partner proceeds with the steps).
+        """
+        plan_lines = "\n".join(f"  {i + 1}. {step}" for i, step in enumerate(plan))
+        ui.show_command_output(
+            f"📋  {config.identity.name} is proposing a plan:\n\n"
+            f"\"{summary}\"\n\n"
+            f"{plan_lines}\n\n"
+            f"If you approve, the partner will proceed with these steps in "
+            f"their next turns. If you decline, no actions are taken; the "
+            f"conversation continues."
+        )
+        return ui.confirm(
+            f"Approve {config.identity.name}'s plan?"
+        )
+
     ui.show_banner()
 
     while True:
@@ -322,6 +341,7 @@ def _run(config: Config) -> int:
                 session,
                 ui=ui,
                 on_checkpoint_request=on_checkpoint_request,
+                on_plan_approval_request=on_plan_approval_request,
             )
         except KeyboardInterrupt:
             # User cancelled mid-generation. Close any open Live region cleanly,

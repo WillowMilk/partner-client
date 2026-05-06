@@ -82,7 +82,7 @@ class ToolsConfig:
         "glob_files", "grep_files",
         "search_web", "fetch_page", "weather",
         "hub_send", "hub_check_inbox", "hub_read_letter",
-        "request_checkpoint",
+        "request_checkpoint", "request_plan_approval",
     ])
     external_tools_dir: str = "tools"
     scopes: list[ScopeConfig] = field(default_factory=list)

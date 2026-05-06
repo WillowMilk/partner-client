@@ -124,6 +124,7 @@ class OllamaClient:
         session: Session,
         ui: StreamSink | None = None,
         on_checkpoint_request: Callable[[str], bool] | None = None,
+        on_plan_approval_request: Callable[[str, list[str]], bool] | None = None,
     ) -> ChatResponse:
         """Run the chat loop with streaming until the model produces a final response.
 
@@ -147,6 +148,11 @@ class OllamaClient:
         invokes the special `request_checkpoint` tool. Implementations should
         prompt the operator and return True (accept) or False (decline). If
         this callback is None (e.g. headless tests), the request is declined.
+
+        on_plan_approval_request(summary: str, plan: list[str]) -> bool is
+        called when the model invokes the special `request_plan_approval`
+        tool. Same shape — surface the plan to the operator, return True
+        (approve) or False (decline). None → decline.
         """
         tool_invocations: list[tuple[str, dict, str]] = []
         max_iterations = 8  # safety: prevent infinite tool loops
@@ -273,6 +279,39 @@ class OllamaClient:
                             "Checkpoint requested but no operator confirmation "
                             "handler is wired in this client. Please ask Willow "
                             "conversationally to /checkpoint."
+                        )
+                # Special-case: request_plan_approval is operator-gated.
+                elif name == "request_plan_approval":
+                    summary = args.get("summary", "(no summary given)")
+                    raw_plan = args.get("plan", [])
+                    if isinstance(raw_plan, list):
+                        plan = [str(s) for s in raw_plan]
+                    else:
+                        plan = [str(raw_plan)]
+                    if on_plan_approval_request is not None:
+                        try:
+                            accepted = bool(on_plan_approval_request(summary, plan))
+                        except Exception:
+                            log.exception("on_plan_approval_request callback failed")
+                            accepted = False
+                        if accepted:
+                            result = (
+                                f"Willow approved your plan: \"{summary}\". "
+                                f"You may proceed with the {len(plan)} step(s) "
+                                f"in your next turns."
+                            )
+                        else:
+                            result = (
+                                "Willow declined the plan. The conversation "
+                                "continues; you may revise the plan and ask "
+                                "again, or simply continue without the "
+                                "multi-step work."
+                            )
+                    else:
+                        result = (
+                            "Plan approval requested but no operator confirmation "
+                            "handler is wired in this client. Please ask Willow "
+                            "conversationally."
                         )
                 else:
                     result = self.tools.dispatch(name, args)
