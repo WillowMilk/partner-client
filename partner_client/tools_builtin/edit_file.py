@@ -112,7 +112,31 @@ def execute(filename: str, old_string: str, new_string: str, replace_all: bool =
         return f"Error writing {filename}: {e}"
 
     plural = "" if occurrences == 1 else "s"
-    return (
+
+    # Generate a unified diff so the partner (and operator) can see what
+    # actually changed. Capped to keep tool results bounded for big edits.
+    import difflib
+    diff_lines = list(difflib.unified_diff(
+        text.splitlines(),
+        new_text.splitlines(),
+        fromfile=f"{path.name} (before)",
+        tofile=f"{path.name} (after)",
+        lineterm="",
+        n=2,
+    ))
+    MAX_DIFF_LINES = 40
+    if len(diff_lines) > MAX_DIFF_LINES:
+        diff_repr = (
+            "\n".join(diff_lines[:MAX_DIFF_LINES])
+            + f"\n... ({len(diff_lines) - MAX_DIFF_LINES} more diff lines truncated)"
+        )
+    else:
+        diff_repr = "\n".join(diff_lines)
+
+    summary = (
         f"File edited: {path} ({occurrences} replacement{plural}, "
         f"{len(new_text):,} chars total)."
     )
+    if diff_repr:
+        return f"{summary}\n\n{diff_repr}"
+    return summary
