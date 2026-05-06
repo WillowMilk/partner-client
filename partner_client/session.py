@@ -4,13 +4,18 @@ Session = one continuous conversation, from client startup to /sleep or process 
 The active session lives in current.json (written every turn for durability).
 At /checkpoint, current.json is snapshotted to a dated archive; at /sleep, the
 session is marked closed and archived.
+
+All session-state writes go through `_atomic_write_text`: write to a sibling
+.tmp file then `os.replace`. This guarantees that a crash or kill mid-write
+leaves either the previous file intact or the new one fully written, never
+a truncated half-file. Loss-on-crash was a real risk at v0.3.1.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import shutil
+import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -20,6 +25,29 @@ from .config import Config
 from .memory import Memory, WakeBundle
 
 log = logging.getLogger(__name__)
+
+
+_SESSION_NUM_MARKER_PREFIX = "[SESSION NUM:"
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Write `text` to `path` atomically.
+
+    Writes to `path.suffix + '.tmp'` in the same directory, then `os.replace`s
+    over the destination. If the process is killed mid-write, the destination
+    is left untouched; the orphaned .tmp can be cleaned up on next run.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(str(tmp), str(path))
+    except Exception:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
 
 
 @dataclass
@@ -66,6 +94,10 @@ class Session:
         self.started_at = datetime.now()
         self.messages = [
             {"role": "system", "content": wake_bundle.system_prompt},
+            # Session-number marker: parsed by _extract_session_num on resume so
+            # the count survives across restart. Its presence in the system
+            # prompt is intentionally low-noise.
+            {"role": "system", "content": f"{_SESSION_NUM_MARKER_PREFIX}{self.session_num}]"},
         ]
         # Append textural-continuity message pairs (if any)
         if wake_bundle.recent_messages:
@@ -102,24 +134,38 @@ class Session:
         self.messages.append(msg)
         self.save_current()
 
-    def append_tool_result(self, name: str, content: str) -> None:
-        self.messages.append({
+    def append_tool_result(self, name: str, content: str, tool_call_id: str = "") -> None:
+        """Append a tool-result message.
+
+        `tool_call_id` correlates the result back to the originating tool_call.
+        When the model issues multiple tool_calls in one turn, ids are how
+        Ollama matches result-to-call. Older Ollama versions ignore the field;
+        newer ones use it. Always pass when available.
+        """
+        msg: dict[str, Any] = {
             "role": "tool",
             "name": name,
             "content": content,
-        })
+        }
+        if tool_call_id:
+            msg["tool_call_id"] = tool_call_id
+        self.messages.append(msg)
         self.save_current()
 
     def save_current(self) -> None:
-        """Write the active session to current.json (durability after every turn)."""
+        """Write the active session to current.json (durability after every turn).
+
+        Atomic: writes to current.json.tmp first, then os.replaces. Crash mid-write
+        leaves the previous current.json intact rather than producing a truncated
+        file that _read_current would silently treat as missing.
+        """
         try:
-            with open(self.current_path, "w", encoding="utf-8") as f:
-                json.dump(
-                    self._serializable_messages(),
-                    f,
-                    ensure_ascii=False,
-                    indent=2,
-                )
+            text = json.dumps(
+                self._serializable_messages(),
+                ensure_ascii=False,
+                indent=2,
+            )
+            _atomic_write_text(self.current_path, text)
         except OSError as e:
             log.warning(f"Failed to save current.json: {e}")
 
@@ -148,14 +194,21 @@ class Session:
         return False
 
     def _extract_session_num(self, messages: list[dict[str, Any]]) -> int | None:
+        """Parse the session-num marker written at fresh-wake time.
+
+        Marker format: `[SESSION NUM:N]` as its own system message. Written
+        in the fresh-wake branch of `wake()`; survives resume so that the
+        session number stays stable across process restarts.
+        """
         for m in messages:
-            if m.get("role") == "system":
-                content = m.get("content", "")
-                if content.startswith("[SESSION ") and "NUM:" in content:
-                    try:
-                        return int(content.split("NUM:")[1].split("]")[0].strip())
-                    except (IndexError, ValueError):
-                        pass
+            if m.get("role") != "system":
+                continue
+            content = m.get("content", "")
+            if content.startswith(_SESSION_NUM_MARKER_PREFIX):
+                try:
+                    return int(content[len(_SESSION_NUM_MARKER_PREFIX):].rstrip("]").strip())
+                except ValueError:
+                    pass
         return None
 
     def checkpoint(self, summary: str = "") -> Path:
@@ -197,8 +250,8 @@ class Session:
             n += 1
 
         try:
-            with open(archive_path, "w", encoding="utf-8") as f:
-                json.dump(messages, f, ensure_ascii=False, indent=2)
+            text = json.dumps(messages, ensure_ascii=False, indent=2)
+            _atomic_write_text(archive_path, text)
         except OSError as e:
             log.warning(f"Failed to write archive {archive_path}: {e}")
             return archive_path
@@ -223,17 +276,20 @@ class Session:
         )
 
     def estimate_tokens(self) -> int:
-        """Rough token-count estimate based on character count.
+        """Token-count estimate for the active session.
 
-        Approximation: ~4 chars per token for English-ish text. This is conservative
-        for English; languages with more compact tokenization may run higher.
+        Uses tiktoken (cl100k_base) when installed — much closer to gemma's
+        real tokenization than the previous chars/4 heuristic. Falls back to
+        chars/3.5 if tiktoken is missing. See partner_client.tokens for the
+        full rationale.
         """
-        total_chars = 0
+        from .tokens import count_tokens
+        total = 0
         for m in self.messages:
             content = m.get("content", "")
             if isinstance(content, str):
-                total_chars += len(content)
+                total += count_tokens(content)
             thinking = m.get("thinking", "")
             if isinstance(thinking, str):
-                total_chars += len(thinking)
-        return total_chars // 4
+                total += count_tokens(thinking)
+        return total

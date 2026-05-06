@@ -91,6 +91,45 @@ def _default_scope_name() -> str:
     return os.environ.get("PARTNER_CLIENT_DEFAULT_SCOPE", "memory")
 
 
+def _scope_resolved(scope: Scope) -> Path:
+    """Return scope.path expanded and resolved, swallowing OSError."""
+    expanded = scope.path.expanduser()
+    try:
+        return expanded.resolve(strict=False)
+    except (OSError, RuntimeError):
+        return expanded
+
+
+def _verify_under_scope(constructed: Path, scope: Scope) -> Path:
+    """Resolve `constructed` and verify it stays under scope.path.
+
+    Defends against `..`-traversal from scope-qualified or bare-filename
+    inputs (e.g. 'memory:../../etc/passwd'). The absolute-path branch in
+    resolve_path is already defended because Path.resolve() collapses `..`
+    before its relative_to check; this helper applies the same protection
+    to the relative-construction branches.
+
+    Returns the resolved path on success. Raises PathError if the resolved
+    path is outside the scope.
+    """
+    scope_resolved = _scope_resolved(scope)
+    constructed_expanded = constructed.expanduser()
+    try:
+        constructed_resolved = constructed_expanded.resolve(strict=False)
+    except (OSError, RuntimeError):
+        constructed_resolved = constructed_expanded
+    try:
+        constructed_resolved.relative_to(scope_resolved)
+    except ValueError:
+        raise PathError(
+            f"Path '{constructed}' resolves to '{constructed_resolved}', "
+            f"which is outside scope '{scope.name}' ({scope_resolved}). "
+            f"This often means the path contains '..' or follows a symlink "
+            f"out of the scope."
+        ) from None
+    return constructed_resolved
+
+
 def resolve_path(filename: str, write: bool = False) -> Path:
     """Resolve a tool argument to a real filesystem path, scope-checked.
 
@@ -119,7 +158,8 @@ def resolve_path(filename: str, write: bool = False) -> Path:
             raise PathError(f"Unknown scope '{scope_name}'. Available scopes: {available}")
         if write and scope.mode != "readwrite":
             raise PathError(f"Scope '{scope_name}' is read-only; cannot write.")
-        return (scope.path / rest).expanduser()
+        constructed = scope.path / rest
+        return _verify_under_scope(constructed, scope)
 
     p = Path(filename).expanduser()
 
@@ -132,10 +172,7 @@ def resolve_path(filename: str, write: bool = False) -> Path:
             p_resolved = p
 
         for scope in scopes:
-            try:
-                scope_resolved = scope.path.expanduser().resolve(strict=False)
-            except (OSError, RuntimeError):
-                scope_resolved = scope.path.expanduser()
+            scope_resolved = _scope_resolved(scope)
             try:
                 p_resolved.relative_to(scope_resolved)
             except ValueError:
@@ -143,7 +180,7 @@ def resolve_path(filename: str, write: bool = False) -> Path:
             # Match found
             if write and scope.mode != "readwrite":
                 raise PathError(f"Path '{p}' is in read-only scope '{scope.name}'.")
-            return p
+            return p_resolved
 
         scopes_str = ", ".join(f"{s.name} ({s.path})" for s in scopes)
         raise PathError(
@@ -158,7 +195,8 @@ def resolve_path(filename: str, write: bool = False) -> Path:
         default_scope = scopes[0]  # fall back to first scope
     if write and default_scope.mode != "readwrite":
         raise PathError(f"Default scope '{default_scope.name}' is read-only.")
-    return (default_scope.path / filename).expanduser()
+    constructed = default_scope.path / filename
+    return _verify_under_scope(constructed, default_scope)
 
 
 def list_scopes() -> list[Scope]:

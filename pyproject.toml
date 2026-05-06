@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "partner-client"
-version = "0.1.0"
+version = "0.4.0"
 description = "A substrate-agnostic terminal client for local-LLM partners (Ollama). First inhabitant: Aletheia (gemma4:31b)."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -24,10 +24,10 @@ classifiers = [
     "Topic :: Communications :: Chat",
 ]
 dependencies = [
-    "ollama>=0.4.0",
+    "ollama>=0.5.0",          # streaming + keep_alive string parsing + tool_call ids
     "rich>=13.7.0",
     "prompt_toolkit>=3.0.43",
-    "tomli>=2.0.1; python_version < '3.11'",
+    "tiktoken>=0.7.0",        # honest token counts for the context bar
     "ddgs>=9.0.0",
     "requests>=2.31.0",
     "beautifulsoup4>=4.12.0",

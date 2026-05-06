@@ -36,7 +36,7 @@ class ModelConfig:
     temperature: float = 1.0
     top_k: int = 64
     top_p: float = 0.95
-    keep_alive: str = "30m"
+    keep_alive: str = "24h"  # 128GB unified memory: keep gemma resident, no cold-load between idle
 
 
 @dataclass
@@ -67,8 +67,11 @@ class ScopeConfig:
 @dataclass
 class ToolsConfig:
     enabled: list[str] = field(default_factory=lambda: [
-        "read_file", "write_file", "list_files",
+        "read_file", "write_file", "edit_file", "list_files",
+        "glob_files", "grep_files",
         "search_web", "fetch_page", "weather",
+        "hub_send", "hub_check_inbox", "hub_read_letter",
+        "request_checkpoint",
     ])
     external_tools_dir: str = "tools"
     scopes: list[ScopeConfig] = field(default_factory=list)

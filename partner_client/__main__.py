@@ -8,10 +8,12 @@ from __future__ import annotations
 
 import argparse
 import logging
-import sys
-from pathlib import Path
-
 import re
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
 
 from .client import OllamaClient, setup_scope_env
 from .commands import CommandRouter
@@ -24,12 +26,53 @@ from .tools import ToolRegistry
 from .ui import UI
 
 
-# Detect plausible image paths in plain text (for the no-directive hint).
-# Matches absolute Unix paths and Windows paths ending in image extensions.
-_IMAGE_PATH_HINT_RE = re.compile(
-    r"((?:/|[A-Za-z]:[\\/])[^\s'\"]+\.(?:jpe?g|png|gif|webp|bmp|tiff?))",
+# Detect plausible image paths in plain text for implicit auto-attachment.
+# Matches absolute Unix paths, tilde-prefixed paths, and Windows paths ending
+# in known image extensions. Scope-qualified forms (e.g. "memory:foo.jpg")
+# are not matched here — those flow through the explicit :image directive.
+_IMAGE_PATH_AUTO_RE = re.compile(
+    r"((?:~|/|[A-Za-z]:[\\/])[^\s'\"]+\.(?:jpe?g|png|gif|webp|bmp|tiff?|heic))",
     re.IGNORECASE,
 )
+
+_IMAGE_EXTENSIONS = {
+    ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tif", ".tiff", ".heic",
+}
+
+
+def _is_image_extension(path: Path) -> bool:
+    return path.suffix.lower() in _IMAGE_EXTENSIONS
+
+
+def _read_clipboard_image() -> bytes | None:
+    """Read an image from the system clipboard. Returns None when unsupported or empty.
+
+    macOS: uses `pbpaste -Prefer public.png`. Falls back to `tiff` if `png` is empty.
+    Other platforms: returns None (graceful — :clip prints a friendly error).
+    """
+    if sys.platform != "darwin":
+        return None
+    for prefer in ("public.png", "public.jpeg", "public.tiff"):
+        try:
+            res = subprocess.run(
+                ["pbpaste", "-Prefer", prefer],
+                capture_output=True,
+                timeout=5,
+                check=False,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            return None
+        data = res.stdout
+        if not data:
+            continue
+        # Validate image magic bytes — pbpaste returns text for non-image clipboards
+        if data.startswith(b"\x89PNG\r\n\x1a\n"):
+            return data
+        if data.startswith(b"\xff\xd8\xff"):  # JPEG
+            return data
+        if data.startswith(b"II*\x00") or data.startswith(b"MM\x00*"):  # TIFF
+            return data
+    return None
 
 
 def main() -> int:
@@ -138,6 +181,10 @@ def _run(config: Config) -> int:
                     tools = ToolRegistry(config)
                     tools.discover()
                     client = OllamaClient(config, tools)
+                    # Rebind session to the new config + memory so checkpoint/sleep
+                    # write to the new locations rather than the stale ones.
+                    session.config = config
+                    session.memory = memory
                     commands = CommandRouter(config, session, tools)
                     ui = UI(config, session)
                     ui.show_command_output("Config reloaded.")
@@ -145,42 +192,81 @@ def _run(config: Config) -> int:
                     ui.show_error(f"Config reload failed: {e}")
             continue
 
-        # Parse input for directives (e.g. :image <path>)
+        # Parse input for explicit :image and :clip directives.
         parsed = parse_input(text)
         images_bytes: list[bytes] = []
+        attachment_failed = False
+
         for img_path in parsed.image_paths:
             # Resolve through scope system (supports bare/scope-qualified/absolute)
             try:
                 resolved = resolve_path(str(img_path), write=False)
             except PathError as e:
                 ui.show_error(f"Image scope error: {e}")
-                images_bytes = []
+                attachment_failed = True
                 break
             if not resolved.is_file():
                 ui.show_error(f"Image not found: {resolved}")
-                images_bytes = []
+                attachment_failed = True
                 break
             try:
-                images_bytes.append(resolved.read_bytes())
-                ui.show_image_attached(str(resolved), resolved.stat().st_size)
+                data = resolved.read_bytes()
+                images_bytes.append(data)
+                ui.show_image_attached(str(resolved), resolved.stat().st_size, image_bytes=data)
             except OSError as e:
                 ui.show_error(f"Error reading image {resolved}: {e}")
-                images_bytes = []
+                attachment_failed = True
                 break
-        if parsed.image_paths and not images_bytes:
-            # Image was specified but failed to load — abort the turn
+
+        # Clipboard image directive (`:clip`)
+        if parsed.clipboard_image:
+            clip_bytes = _read_clipboard_image()
+            if clip_bytes is None:
+                ui.show_error(
+                    "No image in clipboard, or clipboard image read isn't supported "
+                    "on this platform (currently macOS-only via pbpaste)."
+                )
+                attachment_failed = True
+            else:
+                # Persist a copy so the image isn't only in volatile session memory.
+                ext = ".png" if clip_bytes.startswith(b"\x89PNG") else (
+                    ".jpg" if clip_bytes.startswith(b"\xff\xd8\xff") else ".tiff"
+                )
+                tmp = Path(tempfile.gettempdir()) / f"{config.identity.name.lower()}-clip-{int(time.time())}{ext}"
+                try:
+                    tmp.write_bytes(clip_bytes)
+                except OSError:
+                    pass  # non-fatal; we still attach the bytes
+                images_bytes.append(clip_bytes)
+                ui.show_image_attached(str(tmp), len(clip_bytes), image_bytes=clip_bytes)
+
+        if attachment_failed:
+            # Explicit directive failed — abort the turn rather than send a half-attached message.
             continue
 
-        # No-directive hint: if there are no images attached but the message
-        # text contains what looks like an image path, suggest the directive.
+        # Implicit detection: when no :image directive was used, scan the message
+        # text for image paths and auto-attach any that resolve to existing files
+        # within an allowed scope. Failures are silent — the path may have been
+        # mentioned without intent to attach (e.g. discussing a file by name).
         if not images_bytes:
-            hint_match = _IMAGE_PATH_HINT_RE.search(parsed.text)
-            if hint_match:
-                ui.show_command_output(
-                    f"hint: did you mean `:image {hint_match.group(1)}`? "
-                    f"(image path detected without the :image directive — "
-                    f"image not attached)"
-                )
+            seen_paths: set[Path] = set()
+            for match in _IMAGE_PATH_AUTO_RE.finditer(parsed.text):
+                candidate_str = match.group(1)
+                try:
+                    candidate = resolve_path(candidate_str, write=False)
+                except PathError:
+                    continue
+                if candidate in seen_paths:
+                    continue
+                if not candidate.is_file() or not _is_image_extension(candidate):
+                    continue
+                try:
+                    data = candidate.read_bytes()
+                except OSError:
+                    continue
+                images_bytes.append(data)
+                seen_paths.add(candidate)
+                ui.show_image_attached(str(candidate), candidate.stat().st_size, image_bytes=data)
 
         # If only a directive was given (no text), provide a default prompt
         message_text = parsed.text or ("What do you see?" if images_bytes else "")
@@ -193,15 +279,33 @@ def _run(config: Config) -> int:
         try:
             response = client.chat(
                 session,
-                on_tool_call=lambda name, args, result: ui.show_tool_call(name, args, result),
+                ui=ui,
                 on_checkpoint_request=on_checkpoint_request,
             )
+        except KeyboardInterrupt:
+            # User cancelled mid-generation. Close any open Live region cleanly,
+            # record a partial-turn marker so the model knows the previous turn
+            # was interrupted (avoids consecutive user-turn confusion next prompt).
+            ui.cancel_stream()
+            ui.show_command_output(
+                "Generation cancelled. The conversation continues — type to send another message."
+            )
+            session.append_assistant(
+                content="(Generation interrupted by Willow.)",
+                thinking=None,
+            )
+            continue
         except Exception as e:
+            ui.cancel_stream()
             ui.show_error(f"Chat failed: {e}")
             logging.exception("Chat error")
             continue
 
-        ui.show_assistant(response.content, thinking=response.thinking)
+        # Content was already rendered during streaming. Render thinking after,
+        # if configured. (Old ui.show_assistant is no longer called; streaming
+        # owns the content display.)
+        if response.thinking and config.ui.show_thinking:
+            ui.show_thinking(response.thinking)
 
     return 0
 

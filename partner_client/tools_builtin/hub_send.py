@@ -136,13 +136,22 @@ def execute(to: str, subject: str, body: str, priority: str = "Normal") -> str:
     )
 
 
+_MAX_SLUG_LEN = 80
+
+
 def _slugify(text: str) -> str:
-    """Turn a subject into a filename-safe lowercase hyphenated slug."""
+    """Turn a subject into a filename-safe lowercase hyphenated slug.
+
+    Capped at _MAX_SLUG_LEN chars so the assembled filename stays within
+    macOS's 255-byte limit even with sender/recipient/date prefixes.
+    """
     import re
     text = text.lower().strip()
     text = re.sub(r"[^a-z0-9\s-]", "", text)
     text = re.sub(r"\s+", "-", text)
     text = re.sub(r"-+", "-", text).strip("-")
+    if len(text) > _MAX_SLUG_LEN:
+        text = text[:_MAX_SLUG_LEN].rstrip("-")
     return text or "untitled"
 
 

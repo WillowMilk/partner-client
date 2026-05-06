@@ -67,6 +67,13 @@ class CommandRouter:
         lines.append("                         Path may be bare (memory scope), scope-qualified")
         lines.append("                         (e.g. desktop:photo.jpg), or absolute.")
         lines.append("                         Multiple :image directives can be chained.")
+        lines.append("                         Image paths in plain text are auto-attached")
+        lines.append("                         when they resolve to existing image files.")
+        lines.append("")
+        lines.append("  :clip [text]           Attach the current clipboard image (macOS only;")
+        lines.append("                         uses pbpaste). Saves a copy to /tmp.")
+        lines.append("")
+        lines.append("Multi-line input:  Enter inserts a newline; Esc-Enter submits.")
         return CommandResult(output="\n".join(lines))
 
     def _cmd_checkpoint(self, arg: str) -> CommandResult:

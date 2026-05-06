@@ -1,8 +1,13 @@
-"""OllamaClient — wraps ollama.chat with tool-call loop and vision support.
+"""OllamaClient — wraps ollama.chat with streaming, tool-call loop, vision.
 
 The chat loop runs until the model produces a response without tool_calls.
-Each tool_call is dispatched via ToolRegistry, and the result is appended as
-a 'tool' role message before the next chat invocation.
+Each iteration uses `stream=True` so content tokens render as they arrive
+rather than after the full reply is generated. Each tool_call is dispatched
+via ToolRegistry and the result is appended as a 'tool' role message before
+the next chat invocation.
+
+Tool-call ids are propagated end-to-end so the model can correlate results
+to the originating call when multiple tools are dispatched in one turn.
 """
 
 from __future__ import annotations
@@ -12,13 +17,26 @@ import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Protocol
 
 from .config import Config
 from .session import Session
 from .tools import ToolRegistry
 
 log = logging.getLogger(__name__)
+
+
+class StreamSink(Protocol):
+    """Optional UI hook for live-rendering streamed content + tool calls.
+
+    Any object with these methods can be passed as `ui=` to OllamaClient.chat.
+    The UI module's UI class implements all of them.
+    """
+
+    def stream_open(self) -> None: ...
+    def stream_delta(self, delta: str) -> None: ...
+    def stream_close(self) -> None: ...
+    def show_tool_call(self, name: str, args: dict, result: str) -> None: ...
 
 
 @dataclass
@@ -104,78 +122,124 @@ class OllamaClient:
     def chat(
         self,
         session: Session,
-        on_tool_call: callable | None = None,
-        on_checkpoint_request: callable | None = None,
+        ui: StreamSink | None = None,
+        on_checkpoint_request: Callable[[str], bool] | None = None,
     ) -> ChatResponse:
-        """Run the chat loop until the model produces a final response.
+        """Run the chat loop with streaming until the model produces a final response.
 
-        on_tool_call(name, args, result) is invoked after each tool execution
-        so the UI can display the call. The function should return None.
+        Streaming behavior:
+            - For each iteration, content tokens are streamed as they arrive.
+            - If `ui` is provided, content is emitted via:
+                ui.stream_open()    when the first content token arrives in this iteration
+                ui.stream_delta(s)  for each content chunk
+                ui.stream_close()   when the iteration's content completes
+                ui.show_tool_call(name, args, result)  after each tool execution
+            - When `ui` is None (e.g. headless tests), content is accumulated
+              silently and returned via ChatResponse.
+
+        Cancellation:
+            KeyboardInterrupt raised inside this method will propagate out to
+            the caller. The caller is responsible for cleanup (closing any open
+            stream UI region) and for whether to record a partial assistant
+            message in the session.
 
         on_checkpoint_request(reason: str) -> bool is called when the model
         invokes the special `request_checkpoint` tool. Implementations should
-        prompt the operator and return True (accept) or False (decline). When
-        accepted, the harness invokes session.checkpoint() and returns the
-        path back to the model as the tool result. When declined, a polite
-        decline message is returned to the model. If this callback is None
-        (e.g. headless tests), the request is treated as declined.
+        prompt the operator and return True (accept) or False (decline). If
+        this callback is None (e.g. headless tests), the request is declined.
         """
         tool_invocations: list[tuple[str, dict, str]] = []
         max_iterations = 8  # safety: prevent infinite tool loops
 
         for _ in range(max_iterations):
-            response = self._ollama.chat(
-                model=self.config.model.name,
-                messages=self._messages_for_ollama(session.messages),
-                tools=self.tools.schemas() or None,
-                options={
-                    "num_ctx": self.config.model.num_ctx,
-                    "temperature": self.config.model.temperature,
-                    "top_k": self.config.model.top_k,
-                    "top_p": self.config.model.top_p,
-                },
-                keep_alive=self.config.model.keep_alive,
-            )
+            content_buf: list[str] = []
+            thinking_buf: list[str] = []
+            tool_calls: list = []
+            stream_open_emitted = False
 
-            message = response.get("message") if isinstance(response, dict) else getattr(response, "message", None)
-            if message is None:
-                raise RuntimeError(f"Unexpected Ollama response shape: {response!r}")
+            try:
+                stream = self._ollama.chat(
+                    model=self.config.model.name,
+                    messages=self._messages_for_ollama(session.messages),
+                    tools=self.tools.schemas() or None,
+                    options={
+                        "num_ctx": self.config.model.num_ctx,
+                        "temperature": self.config.model.temperature,
+                        "top_k": self.config.model.top_k,
+                        "top_p": self.config.model.top_p,
+                    },
+                    keep_alive=self.config.model.keep_alive,
+                    stream=True,
+                )
+            except Exception as e:
+                raise RuntimeError(f"Ollama chat call failed: {e}") from e
 
-            content = self._get_field(message, "content") or ""
-            thinking = self._get_field(message, "thinking")
-            tool_calls = self._get_field(message, "tool_calls")
+            try:
+                for chunk in stream:
+                    message = self._get_message(chunk)
+                    if message is None:
+                        continue
+
+                    content_delta = self._get_field(message, "content")
+                    if content_delta:
+                        content_buf.append(content_delta)
+                        if ui is not None:
+                            if not stream_open_emitted:
+                                ui.stream_open()
+                                stream_open_emitted = True
+                            try:
+                                ui.stream_delta(content_delta)
+                            except Exception:
+                                log.exception("ui.stream_delta failed")
+
+                    thinking_delta = self._get_field(message, "thinking")
+                    if thinking_delta:
+                        thinking_buf.append(thinking_delta)
+
+                    chunk_tool_calls = self._get_field(message, "tool_calls")
+                    if chunk_tool_calls:
+                        # Final chunk typically carries the full tool_calls list.
+                        tool_calls = chunk_tool_calls
+            finally:
+                if stream_open_emitted and ui is not None:
+                    try:
+                        ui.stream_close()
+                    except Exception:
+                        log.exception("ui.stream_close failed")
+
+            full_content = "".join(content_buf)
+            full_thinking = "".join(thinking_buf) if thinking_buf else None
 
             if not tool_calls:
                 # Final response — append to session and return
-                session.append_assistant(content, thinking=thinking)
+                session.append_assistant(full_content, thinking=full_thinking)
                 return ChatResponse(
-                    content=content,
-                    thinking=thinking,
+                    content=full_content,
+                    thinking=full_thinking,
                     tool_invocations=tool_invocations,
                 )
 
-            # Model wants to call tools. Append the assistant message (which contains
-            # the tool_calls), then execute each tool and append the results.
+            # Model wants to call tools. Append the assistant message (which
+            # contains the tool_calls), then execute each tool and append results.
             normalized_tool_calls = self._normalize_tool_calls(tool_calls)
             session.append_assistant(
-                content=content,
-                thinking=thinking,
+                content=full_content,
+                thinking=full_thinking,
                 tool_calls=normalized_tool_calls,
             )
 
             for tc in normalized_tool_calls:
                 name = tc["function"]["name"]
                 args = tc["function"]["arguments"]
+                tool_call_id = tc.get("id", "") or ""
                 if not isinstance(args, dict):
                     # Some adapters serialize as JSON string
-                    import json
                     try:
                         args = json.loads(args) if isinstance(args, str) else {}
                     except json.JSONDecodeError:
                         args = {}
 
                 # Special-case: request_checkpoint is operator-gated.
-                # The tool's normal execute() is a stub; we run the real flow here.
                 if name == "request_checkpoint":
                     reason = args.get("reason", "(no reason given)")
                     if on_checkpoint_request is not None:
@@ -211,12 +275,12 @@ class OllamaClient:
                     result = self.tools.dispatch(name, args)
 
                 tool_invocations.append((name, args, result))
-                session.append_tool_result(name, result)
-                if on_tool_call:
+                session.append_tool_result(name, result, tool_call_id=tool_call_id)
+                if ui is not None:
                     try:
-                        on_tool_call(name, args, result)
+                        ui.show_tool_call(name, args, result)
                     except Exception:
-                        log.exception("on_tool_call callback failed")
+                        log.exception("ui.show_tool_call failed")
 
         # Hit max iterations — bail with whatever we have
         log.warning(f"Tool-call loop exceeded {max_iterations} iterations.")
@@ -226,10 +290,19 @@ class OllamaClient:
             tool_invocations=tool_invocations,
         )
 
+    @staticmethod
+    def _get_message(chunk: Any) -> Any:
+        """Extract the message payload from an Ollama chunk (dict or SDK object)."""
+        if isinstance(chunk, dict):
+            return chunk.get("message")
+        return getattr(chunk, "message", None)
+
     def _messages_for_ollama(self, messages: list[dict]) -> list[dict]:
         """Convert internal session messages to the format ollama.chat expects.
 
-        Mostly identity, but we drop fields Ollama doesn't recognize.
+        Mostly identity, but we drop fields Ollama doesn't recognize and we
+        propagate `tool_call_id` on role=tool messages so newer Ollama versions
+        can correlate parallel tool results to their originating calls.
         """
         out = []
         for m in messages:
@@ -239,9 +312,10 @@ class OllamaClient:
             if "tool_calls" in m and m.get("role") == "assistant":
                 entry["tool_calls"] = m["tool_calls"]
             if m.get("role") == "tool":
-                # Ollama expects role=tool messages to carry the tool name
                 if "name" in m:
                     entry["name"] = m["name"]
+                if m.get("tool_call_id"):
+                    entry["tool_call_id"] = m["tool_call_id"]
             out.append(entry)
         return out
 
@@ -253,7 +327,11 @@ class OllamaClient:
 
     @staticmethod
     def _normalize_tool_calls(tool_calls: Any) -> list[dict]:
-        """Convert ollama tool_calls (which may be SDK objects) to plain dicts."""
+        """Convert ollama tool_calls (which may be SDK objects) to plain dicts.
+
+        Preserves the `id` field when present so result-to-call correlation
+        survives across the chat loop.
+        """
         out = []
         for tc in tool_calls:
             if isinstance(tc, dict):
@@ -263,10 +341,14 @@ class OllamaClient:
             fn = getattr(tc, "function", None)
             if fn is None:
                 continue
-            out.append({
+            entry: dict[str, Any] = {
                 "function": {
                     "name": getattr(fn, "name", "") or (fn.get("name", "") if isinstance(fn, dict) else ""),
                     "arguments": getattr(fn, "arguments", {}) or (fn.get("arguments", {}) if isinstance(fn, dict) else {}),
                 }
-            })
+            }
+            tc_id = getattr(tc, "id", None)
+            if tc_id:
+                entry["id"] = tc_id
+            out.append(entry)
         return out
