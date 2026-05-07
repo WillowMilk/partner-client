@@ -97,6 +97,8 @@ class ToolsConfig:
         "search_web", "fetch_page", "weather",
         "hub_send", "hub_check_inbox", "hub_read_letter",
         "request_checkpoint", "request_plan_approval",
+        "git_clone", "git_status", "git_diff", "git_log",
+        "git_pull", "git_add", "git_commit", "git_push",
     ])
     external_tools_dir: str = "tools"
     scopes: list[ScopeConfig] = field(default_factory=list)
@@ -126,6 +128,24 @@ class HubConfig:
 
 
 @dataclass
+class GitConfig:
+    """Optional configuration for the git_* tool suite.
+
+    Default empty allowlist means every git_push surfaces an operator
+    approval prompt. Add URL substrings to push_allowlist to auto-approve
+    pushes to those targets — typically the partner's own sandbox repo.
+
+    Committer identity defaults are written to commits made via git_commit
+    (env vars GIT_AUTHOR_NAME/EMAIL + GIT_COMMITTER_NAME/EMAIL) so the
+    history reflects the partner's authorship rather than the operator's.
+    Empty values fall back to git's global config.
+    """
+    push_allowlist: list[str] = field(default_factory=list)
+    default_committer_name: str = ""
+    default_committer_email: str = ""
+
+
+@dataclass
 class LoggingConfig:
     level: str = "INFO"
     log_file: str = "Memory/.client-log.jsonl"
@@ -142,6 +162,7 @@ class Config:
     logging: LoggingConfig
     config_path: Path  # the path the config was loaded from
     hub: HubConfig = field(default_factory=HubConfig)
+    git: GitConfig = field(default_factory=GitConfig)
 
     @property
     def home_dir(self) -> Path:
@@ -209,6 +230,7 @@ def load_config(path: str | Path) -> Config:
     ui = UIConfig(**_filter_known_fields(data.get("ui", {}), UIConfig))
     logging = LoggingConfig(**_filter_known_fields(data.get("logging", {}), LoggingConfig))
     hub = HubConfig(**_filter_known_fields(data.get("hub", {}), HubConfig))
+    git = GitConfig(**_filter_known_fields(data.get("git", {}), GitConfig))
 
     return Config(
         identity=identity,
@@ -220,6 +242,7 @@ def load_config(path: str | Path) -> Config:
         logging=logging,
         config_path=config_path,
         hub=hub,
+        git=git,
     )
 
 

@@ -99,6 +99,18 @@ def setup_scope_env(config: Config) -> list[dict]:
         os.environ.pop("PARTNER_CLIENT_HUB_DIR", None)
         os.environ.pop("PARTNER_CLIENT_HUB_PARTNER", None)
 
+    # Git committer identity (for git_commit tool — empty values fall back
+    # to git's global config). Read by git_commit at execution time so the
+    # commit history attributes to the partner rather than the operator.
+    if config.git.default_committer_name:
+        os.environ["PARTNER_CLIENT_GIT_COMMITTER_NAME"] = config.git.default_committer_name
+    else:
+        os.environ.pop("PARTNER_CLIENT_GIT_COMMITTER_NAME", None)
+    if config.git.default_committer_email:
+        os.environ["PARTNER_CLIENT_GIT_COMMITTER_EMAIL"] = config.git.default_committer_email
+    else:
+        os.environ.pop("PARTNER_CLIENT_GIT_COMMITTER_EMAIL", None)
+
     return all_scopes
 
 
@@ -125,6 +137,7 @@ class OllamaClient:
         ui: StreamSink | None = None,
         on_checkpoint_request: Callable[[str], bool] | None = None,
         on_plan_approval_request: Callable[[str, list[str]], bool] | None = None,
+        on_git_push_request: Callable[[str, str, list[str]], bool] | None = None,
     ) -> ChatResponse:
         """Run the chat loop with streaming until the model produces a final response.
 
@@ -156,6 +169,12 @@ class OllamaClient:
         on_plan_approval_request(summary: str, plan: list[str]) -> bool |
         tuple[bool, str | None] follows the same three-option shape — bool
         for legacy, tuple for decline-with-message support.
+
+        on_git_push_request(repo: str, remote_url: str, commits: list[str])
+        -> bool | tuple[bool, str | None] is called when the model invokes
+        git_push and the remote URL is NOT in config.git.push_allowlist.
+        Pushes to allowlisted URLs auto-approve without invoking this
+        callback. Same three-option consent shape as the others.
         """
         tool_invocations: list[tuple[str, dict, str]] = []
         # Chat-loop iteration cap (configurable via [model] max_tool_iterations).
@@ -355,6 +374,81 @@ class OllamaClient:
                             "handler is wired in this client. Please ask Willow "
                             "conversationally."
                         )
+                # Special-case: git_push is operator-gated (with allowlist short-circuit).
+                elif name == "git_push":
+                    repo_arg = args.get("repo", "")
+                    remote_arg = args.get("remote", "origin")
+
+                    # Resolve repo path + look up remote URL for the prompt.
+                    try:
+                        from ._git_helpers import (
+                            GitError,
+                            get_remote_url,
+                            resolve_repo,
+                            run_git,
+                        )
+                        repo_path = resolve_repo(repo_arg, write=True)
+                        remote_url = get_remote_url(repo_path, remote_arg) or "(unknown URL)"
+                    except (GitError, ImportError) as e:
+                        result = f"git_push setup failed: {e}"
+                    else:
+                        # Substring match — "github.com/foo/bar" matches both
+                        # ".../bar" and ".../bar.git" forms.
+                        allowlist = list(self.config.git.push_allowlist)
+                        on_allowlist = (
+                            any(allowed in remote_url for allowed in allowlist)
+                            if allowlist else False
+                        )
+
+                        if on_allowlist:
+                            # Auto-approve — dispatch directly.
+                            result = self.tools.dispatch(name, args)
+                        elif on_git_push_request is not None:
+                            # Off-allowlist: gather pending-commit summary for the prompt.
+                            log_rc, log_stdout, _ = run_git(
+                                repo_path,
+                                ["log", "--oneline", "@{u}..HEAD"],
+                            )
+                            if log_rc == 0 and log_stdout.strip():
+                                commits = log_stdout.strip().split("\n")
+                            else:
+                                commits = ["(no pending commits — push may be a no-op)"]
+
+                            try:
+                                response = on_git_push_request(repo_arg, remote_url, commits)
+                                if isinstance(response, tuple) and len(response) >= 2:
+                                    accepted, custom_message = bool(response[0]), response[1]
+                                else:
+                                    accepted, custom_message = bool(response), None
+                            except Exception:
+                                log.exception("on_git_push_request callback failed")
+                                accepted, custom_message = False, None
+
+                            if accepted:
+                                push_result = self.tools.dispatch(name, args)
+                                if custom_message:
+                                    result = f"{push_result}\n\nWillow added: \"{custom_message}\""
+                                else:
+                                    result = push_result
+                            else:
+                                if custom_message:
+                                    result = (
+                                        f"Willow declined the push and said:\n\n"
+                                        f"  \"{custom_message}\""
+                                    )
+                                else:
+                                    result = (
+                                        "Willow declined the push silently. "
+                                        "The conversation continues; you may "
+                                        "revise or simply continue without "
+                                        "pushing right now."
+                                    )
+                        else:
+                            result = (
+                                "git_push requested but no operator confirmation "
+                                "handler is wired in this client. The push was "
+                                "not performed."
+                            )
                 else:
                     result = self.tools.dispatch(name, args)
 

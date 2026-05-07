@@ -200,6 +200,33 @@ def _run(config: Config) -> int:
             f"Approve {config.identity.name}'s plan?"
         )
 
+    def on_git_push_request(
+        repo: str,
+        remote_url: str,
+        commits: list[str],
+    ) -> tuple[bool, str | None]:
+        """Surface a partner's git_push call (off-allowlist) to the operator.
+
+        Called only when the remote URL is NOT in config.git.push_allowlist.
+        Allowlisted pushes auto-approve and never reach this callback. Returns
+        (accepted, optional_message) — typed response flows back as the tool
+        result so a redirect can carry the operator's voice rather than read
+        as substrate refusal.
+        """
+        commit_lines = "\n".join(f"  {c}" for c in commits) if commits else "  (none)"
+        ui.show_command_output(
+            f"📋  {config.identity.name} is asking to git_push: {repo}\n\n"
+            f"Remote URL: {remote_url}\n"
+            f"  ⚠ This URL is NOT in your push_allowlist.\n\n"
+            f"Pending commits:\n{commit_lines}\n\n"
+            f"If you approve, the push proceeds. If you decline silently, "
+            f"the push is skipped. If you type a response, that text flows "
+            f"back to the partner as the tool result."
+        )
+        return ui.confirm_with_response(
+            f"Approve {config.identity.name}'s push to {remote_url}?"
+        )
+
     ui.show_banner()
 
     while True:
@@ -345,6 +372,7 @@ def _run(config: Config) -> int:
                 ui=ui,
                 on_checkpoint_request=on_checkpoint_request,
                 on_plan_approval_request=on_plan_approval_request,
+                on_git_push_request=on_git_push_request,
             )
         except KeyboardInterrupt:
             # User cancelled mid-generation. Close any open Live region cleanly,
