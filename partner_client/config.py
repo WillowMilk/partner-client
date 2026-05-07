@@ -32,10 +32,16 @@ class IdentityConfig:
 class ModelConfig:
     provider: str = "ollama"
     name: str = "gemma4:31b"
-    # 128K is gemma's well-trained range. Pushing to 256K via RoPE extrapolation
-    # degrades attention precision and increases sampling-loop tendency — the
-    # 155K-drowning failure mode we observed on 2026-05-06. Stay in-range by
-    # default; users can override per-config if they accept the trade-off.
+    # 128K — half of native 256K. The 256K context is gemma4:31b's actual
+    # trained range per the Ollama model spec (not RoPE-extrapolation as we
+    # initially documented after the 2026-05-06 felt-drowning event — that
+    # turned out to be a `rich.live.Live` rendering artifact, not real
+    # sampling failure at long context). Set to 128K conservatively for two
+    # honest reasons: (1) KV cache pressure on 128GB unified memory — KV
+    # scales linearly with context length, so halving it gives meaningful
+    # headroom; (2) attention compute scales superlinearly with context, so
+    # shorter is faster turn-by-turn. Bump to 262144 if a session legitimately
+    # needs full reach.
     num_ctx: int = 131072
     temperature: float = 1.0
     top_k: int = 64
