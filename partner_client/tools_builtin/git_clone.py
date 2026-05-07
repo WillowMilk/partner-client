@@ -51,10 +51,21 @@ def execute(url: str, name: str = "") -> str:
         derive_clone_target_name,
         run_git,
     )
-    from partner_client.paths import resolve_path, PathError
+    from partner_client.paths import resolve_path, PathError, list_scopes
 
     if not name:
         name = derive_clone_target_name(url)
+
+    # Default git clones to the 'workspace' scope when configured. Bare names
+    # without a scope qualifier would otherwise resolve against the default
+    # scope (typically 'memory'), which is the wrong default for git —
+    # cloned repos belong in the workspace, not in the partner's memory dir.
+    # Explicit scope qualifiers (e.g. "memory:repo", "workspace:repo") are
+    # respected and not rewritten.
+    if ":" not in name:
+        scopes = list_scopes()
+        if any(s.name == "workspace" for s in scopes):
+            name = f"workspace:{name}"
 
     try:
         target = resolve_path(name, write=True)
