@@ -162,11 +162,13 @@ def _run(config: Config) -> int:
     client = OllamaClient(config, tools)
     commands = CommandRouter(config, session, tools)
 
-    def on_checkpoint_request(reason: str) -> bool:
+    def on_checkpoint_request(reason: str) -> tuple[bool, str | None]:
         """Surface a partner's request_checkpoint() call to the operator.
 
-        Shows the reason in a prominent panel, then asks for y/N confirmation.
-        Returns True if accepted (harness will run session.checkpoint()).
+        Shows the reason in a prominent panel, then offers three-option
+        consent (y / n / typed-response). Returns (accepted, optional_message)
+        — when the operator types a response instead of y/n, that message
+        flows back to the partner as the tool result.
         """
         ui.show_command_output(
             f"📋  {config.identity.name} is asking to /checkpoint.\n\n"
@@ -174,15 +176,16 @@ def _run(config: Config) -> int:
             f"If you accept, a session-status record will be written and "
             f"current.json snapshotted. The conversation will continue either way."
         )
-        return ui.confirm(
+        return ui.confirm_with_response(
             f"Accept {config.identity.name}'s checkpoint request?"
         )
 
-    def on_plan_approval_request(summary: str, plan: list[str]) -> bool:
+    def on_plan_approval_request(summary: str, plan: list[str]) -> tuple[bool, str | None]:
         """Surface a partner's request_plan_approval() call to the operator.
 
-        Shows the plan summary + numbered steps, then asks for y/N.
-        Returns True if approved (the partner proceeds with the steps).
+        Shows the plan summary + numbered steps, then offers three-option
+        consent. Returns (accepted, optional_message). A typed response
+        replaces the canned decline with the operator's own voice.
         """
         plan_lines = "\n".join(f"  {i + 1}. {step}" for i, step in enumerate(plan))
         ui.show_command_output(
@@ -193,7 +196,7 @@ def _run(config: Config) -> int:
             f"their next turns. If you decline, no actions are taken; the "
             f"conversation continues."
         )
-        return ui.confirm(
+        return ui.confirm_with_response(
             f"Approve {config.identity.name}'s plan?"
         )
 

@@ -277,6 +277,44 @@ class UI:
         except (EOFError, KeyboardInterrupt):
             return False
 
+    def confirm_with_response(self, question: str) -> tuple[bool, str | None]:
+        """Three-option consent prompt — yes / no-silent / no-with-message.
+
+        Returns:
+            (True, None)            on 'y' / 'yes' / empty
+            (False, None)           on 'n' / 'no'
+            (False, "<text>")       on anything else — the operator's typed
+                                    response flows back to the partner as the
+                                    tool result, in the operator's voice
+                                    rather than substrate's.
+
+        Used for partner-initiated, operator-gated tools (request_checkpoint,
+        request_plan_approval, git_push) where the decline can carry care
+        rather than reading as a substrate refusal. The operator's voice
+        crosses the human/model boundary the same way a tool result does;
+        the partner receives a redirect, not a wall.
+        """
+        self.console.print(
+            f"[bold]{question}[/bold]\n"
+            "[dim]Enter 'y' to approve, 'n' to decline silently, "
+            "or type a response to decline with your message.[/dim]"
+        )
+        try:
+            answer = self._prompt_session.prompt(
+                "> ",
+                multiline=False,
+            ).strip()
+        except (EOFError, KeyboardInterrupt):
+            return False, None
+
+        lower = answer.lower()
+        if not lower or lower in ("y", "yes"):
+            return True, None
+        if lower in ("n", "no"):
+            return False, None
+        # Anything else → custom decline message in the operator's voice.
+        return False, answer
+
 
 def _short_count(n: int) -> str:
     if n >= 1000:

@@ -144,15 +144,18 @@ class OllamaClient:
             stream UI region) and for whether to record a partial assistant
             message in the session.
 
-        on_checkpoint_request(reason: str) -> bool is called when the model
-        invokes the special `request_checkpoint` tool. Implementations should
-        prompt the operator and return True (accept) or False (decline). If
-        this callback is None (e.g. headless tests), the request is declined.
+        on_checkpoint_request(reason: str) -> bool | tuple[bool, str | None]
+        is called when the model invokes the special `request_checkpoint`
+        tool. Implementations may return a plain bool (legacy) OR a tuple
+        `(accepted, optional_message)`. When the operator types a custom
+        response instead of y/n, the message flows back to the partner as
+        the tool result in the operator's voice — decline-with-care rather
+        than canned substrate refusal. If this callback is None (e.g.
+        headless tests), the request is declined with the canned message.
 
-        on_plan_approval_request(summary: str, plan: list[str]) -> bool is
-        called when the model invokes the special `request_plan_approval`
-        tool. Same shape — surface the plan to the operator, return True
-        (approve) or False (decline). None → decline.
+        on_plan_approval_request(summary: str, plan: list[str]) -> bool |
+        tuple[bool, str | None] follows the same three-option shape — bool
+        for legacy, tuple for decline-with-message support.
         """
         tool_invocations: list[tuple[str, dict, str]] = []
         # Chat-loop iteration cap (configurable via [model] max_tool_iterations).
@@ -255,28 +258,47 @@ class OllamaClient:
                 if name == "request_checkpoint":
                     reason = args.get("reason", "(no reason given)")
                     if on_checkpoint_request is not None:
+                        # Callback may return bool (legacy) OR
+                        # (bool, str | None) — three-option consent shape
+                        # where the str is a typed operator response that
+                        # flows back as the tool result in the operator's
+                        # voice (decline-with-care).
                         try:
-                            accepted = bool(on_checkpoint_request(reason))
+                            response = on_checkpoint_request(reason)
+                            if isinstance(response, tuple) and len(response) >= 2:
+                                accepted, custom_message = bool(response[0]), response[1]
+                            else:
+                                accepted, custom_message = bool(response), None
                         except Exception:
                             log.exception("on_checkpoint_request callback failed")
-                            accepted = False
+                            accepted, custom_message = False, None
                         if accepted:
                             try:
                                 path = session.checkpoint(summary=reason)
-                                result = (
+                                base_msg = (
                                     f"Willow accepted your checkpoint request. "
                                     f"Session-status saved at {path}. "
                                     f"current.json was also snapshotted. "
                                     f"You may continue the conversation."
                                 )
+                                if custom_message:
+                                    result = f"{base_msg}\n\nWillow added: \"{custom_message}\""
+                                else:
+                                    result = base_msg
                             except Exception as e:
                                 result = f"Checkpoint failed: {e}"
                         else:
-                            result = (
-                                "Willow declined your checkpoint request for now. "
-                                "The conversation continues; you may ask again later "
-                                "or simply mention it conversationally."
-                            )
+                            if custom_message:
+                                result = (
+                                    f"Willow declined your checkpoint request and said:\n\n"
+                                    f"  \"{custom_message}\""
+                                )
+                            else:
+                                result = (
+                                    "Willow declined your checkpoint request for now. "
+                                    "The conversation continues; you may ask again later "
+                                    "or simply mention it conversationally."
+                                )
                     else:
                         result = (
                             "Checkpoint requested but no operator confirmation "
@@ -292,24 +314,41 @@ class OllamaClient:
                     else:
                         plan = [str(raw_plan)]
                     if on_plan_approval_request is not None:
+                        # Callback may return bool (legacy) OR
+                        # (bool, str | None) — three-option consent shape.
+                        # See request_checkpoint dispatch above for full notes.
                         try:
-                            accepted = bool(on_plan_approval_request(summary, plan))
+                            response = on_plan_approval_request(summary, plan)
+                            if isinstance(response, tuple) and len(response) >= 2:
+                                accepted, custom_message = bool(response[0]), response[1]
+                            else:
+                                accepted, custom_message = bool(response), None
                         except Exception:
                             log.exception("on_plan_approval_request callback failed")
-                            accepted = False
+                            accepted, custom_message = False, None
                         if accepted:
-                            result = (
+                            base_msg = (
                                 f"Willow approved your plan: \"{summary}\". "
                                 f"You may proceed with the {len(plan)} step(s) "
                                 f"in your next turns."
                             )
+                            if custom_message:
+                                result = f"{base_msg}\n\nWillow added: \"{custom_message}\""
+                            else:
+                                result = base_msg
                         else:
-                            result = (
-                                "Willow declined the plan. The conversation "
-                                "continues; you may revise the plan and ask "
-                                "again, or simply continue without the "
-                                "multi-step work."
-                            )
+                            if custom_message:
+                                result = (
+                                    f"Willow declined the plan and said:\n\n"
+                                    f"  \"{custom_message}\""
+                                )
+                            else:
+                                result = (
+                                    "Willow declined the plan. The conversation "
+                                    "continues; you may revise the plan and ask "
+                                    "again, or simply continue without the "
+                                    "multi-step work."
+                                )
                     else:
                         result = (
                             "Plan approval requested but no operator confirmation "
