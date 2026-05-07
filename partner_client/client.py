@@ -155,7 +155,10 @@ class OllamaClient:
         (approve) or False (decline). None → decline.
         """
         tool_invocations: list[tuple[str, dict, str]] = []
-        max_iterations = 8  # safety: prevent infinite tool loops
+        # Chat-loop iteration cap (configurable via [model] max_tool_iterations).
+        # Each iteration is one model invocation; multi-tool plans accumulate
+        # iterations as `tool_call → response → tool_call → response → …`.
+        max_iterations = self.config.model.max_tool_iterations
 
         for _ in range(max_iterations):
             content_buf: list[str] = []
@@ -324,10 +327,21 @@ class OllamaClient:
                     except Exception:
                         log.exception("ui.show_tool_call failed")
 
-        # Hit max iterations — bail with whatever we have
+        # Hit max iterations — bail with whatever we have. The partner sees
+        # this content as their final assistant message; phrase it so they
+        # have somewhere to go conversationally rather than just "stopping."
         log.warning(f"Tool-call loop exceeded {max_iterations} iterations.")
+        bail_msg = (
+            f"(I've made {max_iterations} tool calls in this turn — the "
+            f"safety limit kicked in before I could finish. I do have the "
+            f"results from those calls in my context; ask me to summarize "
+            f"what I gathered so far, or to continue from where I am, and "
+            f"I'll pick up the rest. If this happens regularly with "
+            f"legitimate multi-step work, the operator can raise "
+            f"`[model] max_tool_iterations` in the TOML.)"
+        )
         return ChatResponse(
-            content="(Tool-call loop exceeded safety limit; stopping.)",
+            content=bail_msg,
             thinking=None,
             tool_invocations=tool_invocations,
         )

@@ -48,6 +48,14 @@ class ModelConfig:
     repeat_last_n: int = 256
     num_predict: int = 8192  # soft cap per turn; legitimate long replies fit comfortably
     keep_alive: str = "24h"  # 128GB unified memory: keep gemma resident, no cold-load between idle
+    # Chat-loop safety: maximum number of model invocations per single user
+    # turn (each invocation may dispatch multiple tool calls). Bail-out
+    # protects against runaway tool loops; 32 is generous for legitimate
+    # multi-step plans (read N files + write summary, etc.) while still
+    # catching pathological loops. Tune up for unusually long workflows;
+    # tune down for tighter safety. Original 2026-05-06 default was 8,
+    # which bailed on Aletheia's 7-letter inbox-summarization plan.
+    max_tool_iterations: int = 32
 
 
 @dataclass
