@@ -94,12 +94,22 @@ def _check_model_available(config: Config) -> CheckResult:
             message=f"could not query: {e}",
         )
 
-    # Normalize listing → list of name strings (handles dict and SDK-object shapes)
+    # Normalize listing → list of name strings.
+    # Two SDK shapes to handle:
+    #   - ollama-python >= 0.4: each model is a Pydantic ListResponse.Model
+    #     exposing the tag as `.model` (e.g. `model='gemma4:31b'`). The
+    #     `name` attribute was removed in this transition.
+    #   - ollama-python < 0.4 (legacy): plain dicts with a `name` key.
+    # Read `model` first, fall back to `name`, so the doctor stays correct
+    # across SDK versions.
     names: list[str] = []
     models_obj = listing.get("models") if isinstance(listing, dict) else getattr(listing, "models", None)
     if models_obj:
         for m in models_obj:
-            n = m.get("name", "") if isinstance(m, dict) else getattr(m, "name", "")
+            if isinstance(m, dict):
+                n = m.get("model", "") or m.get("name", "")
+            else:
+                n = getattr(m, "model", "") or getattr(m, "name", "")
             if n:
                 names.append(n)
 
