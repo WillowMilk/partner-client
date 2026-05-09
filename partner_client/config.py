@@ -170,7 +170,7 @@ class Config:
 
     def resolve(self, relative: str) -> Path:
         """Resolve a path-string from the config relative to the partner's home_dir."""
-        p = Path(relative)
+        p = Path(relative).expanduser()
         if p.is_absolute():
             return p
         return self.home_dir / p
@@ -194,7 +194,11 @@ def load_config(path: str | Path) -> Config:
     if "home_dir" not in identity_raw:
         raise ConfigError("[identity] section missing required 'home_dir' field")
 
-    home_dir = Path(identity_raw["home_dir"]).expanduser().resolve()
+    home_dir_raw = Path(identity_raw["home_dir"]).expanduser()
+    if home_dir_raw.is_absolute():
+        home_dir = home_dir_raw.resolve()
+    else:
+        home_dir = (config_path.parent / home_dir_raw).resolve()
     if not home_dir.is_dir():
         raise ConfigError(f"home_dir does not exist: {home_dir}")
 

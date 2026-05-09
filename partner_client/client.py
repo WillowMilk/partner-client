@@ -15,12 +15,14 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
 from .config import Config
 from .session import Session
+from .timeline import RunTimeline, duration_ms
 from .tools import ToolRegistry
 
 log = logging.getLogger(__name__)
@@ -46,6 +48,11 @@ class ChatResponse:
     content: str
     thinking: str | None
     tool_invocations: list[tuple[str, dict, str]]  # [(name, args, result)]
+
+
+def is_git_push_allowlisted(remote_url: str, allowlist: list[str]) -> bool:
+    """Return True when a git_push remote is covered by the configured allowlist."""
+    return any(allowed in remote_url for allowed in allowlist) if allowlist else False
 
 
 def setup_scope_env(config: Config) -> list[dict]:
@@ -91,7 +98,7 @@ def setup_scope_env(config: Config) -> list[dict]:
 
     # Hub configuration (for hub_send / hub_check_inbox / hub_read_letter tools)
     if config.hub.path:
-        os.environ["PARTNER_CLIENT_HUB_DIR"] = config.hub.path
+        os.environ["PARTNER_CLIENT_HUB_DIR"] = str(config.resolve(config.hub.path))
         os.environ["PARTNER_CLIENT_HUB_PARTNER"] = (
             config.hub.partner_name or config.identity.name.lower()
         )
@@ -115,9 +122,15 @@ def setup_scope_env(config: Config) -> list[dict]:
 
 
 class OllamaClient:
-    def __init__(self, config: Config, tools: ToolRegistry):
+    def __init__(
+        self,
+        config: Config,
+        tools: ToolRegistry,
+        timeline: RunTimeline | None = None,
+    ):
         self.config = config
         self.tools = tools
+        self.timeline = timeline
         try:
             import ollama
         except ImportError as e:
@@ -182,11 +195,20 @@ class OllamaClient:
         # iterations as `tool_call → response → tool_call → response → …`.
         max_iterations = self.config.model.max_tool_iterations
 
-        for _ in range(max_iterations):
+        for iteration in range(1, max_iterations + 1):
             content_buf: list[str] = []
             thinking_buf: list[str] = []
             tool_calls: list = []
             stream_open_emitted = False
+            model_started = time.perf_counter()
+
+            if self.timeline is not None:
+                self.timeline.record(
+                    "model_call_start",
+                    iteration=iteration,
+                    message_count=len(session.messages),
+                    context_tokens=session.estimate_tokens(),
+                )
 
             try:
                 stream = self._ollama.chat(
@@ -206,6 +228,13 @@ class OllamaClient:
                     stream=True,
                 )
             except Exception as e:
+                if self.timeline is not None:
+                    self.timeline.record(
+                        "model_call_error",
+                        iteration=iteration,
+                        error=str(e),
+                        duration_ms=duration_ms(model_started),
+                    )
                 raise RuntimeError(f"Ollama chat call failed: {e}") from e
 
             try:
@@ -234,6 +263,15 @@ class OllamaClient:
                     if chunk_tool_calls:
                         # Final chunk typically carries the full tool_calls list.
                         tool_calls = chunk_tool_calls
+            except Exception as e:
+                if self.timeline is not None:
+                    self.timeline.record(
+                        "model_call_error",
+                        iteration=iteration,
+                        error=str(e),
+                        duration_ms=duration_ms(model_started),
+                    )
+                raise
             finally:
                 if stream_open_emitted and ui is not None:
                     try:
@@ -245,8 +283,25 @@ class OllamaClient:
             full_thinking = "".join(thinking_buf) if thinking_buf else None
 
             if not tool_calls:
+                if self.timeline is not None:
+                    self.timeline.record(
+                        "model_call_end",
+                        iteration=iteration,
+                        duration_ms=duration_ms(model_started),
+                        content_chars=len(full_content),
+                        thinking_chars=len(full_thinking or ""),
+                        tool_call_count=0,
+                    )
                 # Final response — append to session and return
                 session.append_assistant(full_content, thinking=full_thinking)
+                if self.timeline is not None:
+                    self.timeline.record(
+                        "assistant_response",
+                        content_chars=len(full_content),
+                        thinking_chars=len(full_thinking or ""),
+                        tool_invocation_count=len(tool_invocations),
+                        context_tokens=session.estimate_tokens(),
+                    )
                 return ChatResponse(
                     content=full_content,
                     thinking=full_thinking,
@@ -256,6 +311,15 @@ class OllamaClient:
             # Model wants to call tools. Append the assistant message (which
             # contains the tool_calls), then execute each tool and append results.
             normalized_tool_calls = self._normalize_tool_calls(tool_calls)
+            if self.timeline is not None:
+                self.timeline.record(
+                    "model_call_end",
+                    iteration=iteration,
+                    duration_ms=duration_ms(model_started),
+                    content_chars=len(full_content),
+                    thinking_chars=len(full_thinking or ""),
+                    tool_call_count=len(normalized_tool_calls),
+                )
             session.append_assistant(
                 content=full_content,
                 thinking=full_thinking,
@@ -272,6 +336,7 @@ class OllamaClient:
                         args = json.loads(args) if isinstance(args, str) else {}
                     except json.JSONDecodeError:
                         args = {}
+                tool_started = time.perf_counter()
 
                 # Special-case: request_checkpoint is operator-gated.
                 if name == "request_checkpoint":
@@ -395,10 +460,7 @@ class OllamaClient:
                         # Substring match — "github.com/foo/bar" matches both
                         # ".../bar" and ".../bar.git" forms.
                         allowlist = list(self.config.git.push_allowlist)
-                        on_allowlist = (
-                            any(allowed in remote_url for allowed in allowlist)
-                            if allowlist else False
-                        )
+                        on_allowlist = is_git_push_allowlisted(remote_url, allowlist)
 
                         if on_allowlist:
                             # Auto-approve — dispatch directly.
@@ -453,6 +515,16 @@ class OllamaClient:
                     result = self.tools.dispatch(name, args)
 
                 tool_invocations.append((name, args, result))
+                if self.timeline is not None:
+                    self.timeline.record(
+                        "tool_call",
+                        iteration=iteration,
+                        name=name,
+                        args=args,
+                        result_preview=result,
+                        result_chars=len(result),
+                        duration_ms=duration_ms(tool_started),
+                    )
                 session.append_tool_result(name, result, tool_call_id=tool_call_id)
                 if ui is not None:
                     try:
@@ -464,6 +536,13 @@ class OllamaClient:
         # this content as their final assistant message; phrase it so they
         # have somewhere to go conversationally rather than just "stopping."
         log.warning(f"Tool-call loop exceeded {max_iterations} iterations.")
+        if self.timeline is not None:
+            self.timeline.record(
+                "tool_loop_limit",
+                max_iterations=max_iterations,
+                tool_invocation_count=len(tool_invocations),
+                context_tokens=session.estimate_tokens(),
+            )
         bail_msg = (
             f"(I've made {max_iterations} tool calls in this turn — the "
             f"safety limit kicked in before I could finish. I do have the "

@@ -21,7 +21,9 @@ from .config import Config, ConfigError, load_config
 from .directives import parse_input
 from .memory import Memory
 from .paths import PathError, resolve_path
+from .plans import PlanStore
 from .session import Session
+from .timeline import RunTimeline
 from .tools import ToolRegistry
 from .ui import UI
 
@@ -143,8 +145,8 @@ def _run(config: Config) -> int:
     wake_bundle = memory.assemble_wake_bundle()
 
     # Decide resume vs fresh
-    needs_decision = session.wake(wake_bundle, resume_existing=None)
-    if needs_decision == "needs-decision":
+    wake_status = session.wake(wake_bundle, resume_existing=None)
+    if wake_status == "needs-decision":
         # Prompt the user
         # Use a tiny ephemeral console here since UI isn't built yet
         import builtins
@@ -156,10 +158,19 @@ def _run(config: Config) -> int:
         except (EOFError, KeyboardInterrupt):
             answer = "n"
         resume = answer in ("y", "yes")
-        session.wake(wake_bundle, resume_existing=resume)
+        wake_status = session.wake(wake_bundle, resume_existing=resume)
 
     ui = UI(config, session)
-    client = OllamaClient(config, tools)
+    timeline = RunTimeline(config, session)
+    timeline.record(
+        "session_wake",
+        status=wake_status,
+        wake_bundle_chars=len(wake_bundle.system_prompt),
+        recent_message_count=len(wake_bundle.recent_messages),
+        context_tokens=session.estimate_tokens(),
+    )
+    plan_store = PlanStore(config)
+    client = OllamaClient(config, tools, timeline=timeline)
     commands = CommandRouter(config, session, tools)
 
     def on_checkpoint_request(reason: str) -> tuple[bool, str | None]:
@@ -176,9 +187,16 @@ def _run(config: Config) -> int:
             f"If you accept, a session-status record will be written and "
             f"current.json snapshotted. The conversation will continue either way."
         )
-        return ui.confirm_with_response(
+        timeline.record("checkpoint_requested", reason=reason)
+        decision = ui.confirm_with_response(
             f"Accept {config.identity.name}'s checkpoint request?"
         )
+        timeline.record(
+            "checkpoint_decision",
+            accepted=decision[0],
+            custom_message=bool(decision[1]),
+        )
+        return decision
 
     def on_plan_approval_request(summary: str, plan: list[str]) -> tuple[bool, str | None]:
         """Surface a partner's request_plan_approval() call to the operator.
@@ -187,18 +205,54 @@ def _run(config: Config) -> int:
         consent. Returns (accepted, optional_message). A typed response
         replaces the canned decline with the operator's own voice.
         """
+        plan_record = None
+        try:
+            plan_record = plan_store.create(summary, plan, session.session_num)
+            timeline.record(
+                "plan_proposed",
+                plan_id=plan_record["id"],
+                summary=summary,
+                step_count=len(plan),
+            )
+        except OSError as e:
+            ui.show_error(f"Could not persist durable plan record: {e}")
+            timeline.record("plan_persist_error", summary=summary, error=str(e))
+
         plan_lines = "\n".join(f"  {i + 1}. {step}" for i, step in enumerate(plan))
+        plan_id_line = f"Plan ID: {plan_record['id']}\n\n" if plan_record else ""
         ui.show_command_output(
             f"📋  {config.identity.name} is proposing a plan:\n\n"
+            f"{plan_id_line}"
             f"\"{summary}\"\n\n"
             f"{plan_lines}\n\n"
             f"If you approve, the partner will proceed with these steps in "
             f"their next turns. If you decline, no actions are taken; the "
             f"conversation continues."
         )
-        return ui.confirm_with_response(
+        decision = ui.confirm_with_response(
             f"Approve {config.identity.name}'s plan?"
         )
+        if plan_record is not None:
+            try:
+                decided = plan_store.decide(
+                    plan_record["id"],
+                    accepted=decision[0],
+                    operator_message=decision[1],
+                )
+                timeline.record(
+                    "plan_decision",
+                    plan_id=plan_record["id"],
+                    status=decided["status"],
+                    custom_message=bool(decision[1]),
+                )
+            except OSError as e:
+                ui.show_error(f"Could not update durable plan decision: {e}")
+                timeline.record(
+                    "plan_decision_persist_error",
+                    plan_id=plan_record["id"],
+                    error=str(e),
+                )
+        return decision
 
     def on_git_push_request(
         repo: str,
@@ -213,6 +267,12 @@ def _run(config: Config) -> int:
         result so a redirect can carry the operator's voice rather than read
         as substrate refusal.
         """
+        timeline.record(
+            "git_push_requested",
+            repo=repo,
+            remote_url=remote_url,
+            commit_count=len(commits),
+        )
         commit_lines = "\n".join(f"  {c}" for c in commits) if commits else "  (none)"
         ui.show_command_output(
             f"📋  {config.identity.name} is asking to git_push: {repo}\n\n"
@@ -223,9 +283,17 @@ def _run(config: Config) -> int:
             f"the push is skipped. If you type a response, that text flows "
             f"back to the partner as the tool result."
         )
-        return ui.confirm_with_response(
+        decision = ui.confirm_with_response(
             f"Approve {config.identity.name}'s push to {remote_url}?"
         )
+        timeline.record(
+            "git_push_decision",
+            repo=repo,
+            remote_url=remote_url,
+            accepted=decision[0],
+            custom_message=bool(decision[1]),
+        )
+        return decision
 
     ui.show_banner()
 
@@ -245,6 +313,13 @@ def _run(config: Config) -> int:
         # Slash commands intercepted client-side
         if commands.is_command(text):
             result = commands.dispatch(text)
+            timeline.record(
+                "slash_command",
+                command=text.split(maxsplit=1)[0],
+                input_chars=len(text),
+                should_exit=result.should_exit,
+                should_reload=result.should_reload,
+            )
             ui.show_command_output(result.output)
             if result.should_exit:
                 break
@@ -254,16 +329,20 @@ def _run(config: Config) -> int:
                     memory = Memory(config)
                     tools = ToolRegistry(config)
                     tools.discover()
-                    client = OllamaClient(config, tools)
+                    timeline = RunTimeline(config, session)
+                    plan_store = PlanStore(config)
+                    client = OllamaClient(config, tools, timeline=timeline)
                     # Rebind session to the new config + memory so checkpoint/sleep
                     # write to the new locations rather than the stale ones.
                     session.config = config
                     session.memory = memory
                     commands = CommandRouter(config, session, tools)
                     ui = UI(config, session)
+                    timeline.record("config_reloaded")
                     ui.show_command_output("Config reloaded.")
                 except ConfigError as e:
                     ui.show_error(f"Config reload failed: {e}")
+                    timeline.record("config_reload_error", error=str(e))
             continue
 
         # Parse input for explicit :image and :clip directives.
@@ -365,6 +444,12 @@ def _run(config: Config) -> int:
 
         # Real conversation turn
         session.append_user(message_text, images=images_bytes if images_bytes else None)
+        timeline.record(
+            "user_message",
+            chars=len(message_text),
+            images=len(images_bytes),
+            context_tokens=session.estimate_tokens(),
+        )
 
         try:
             response = client.chat(
@@ -386,11 +471,16 @@ def _run(config: Config) -> int:
                 content="(Generation interrupted by Willow.)",
                 thinking=None,
             )
+            timeline.record(
+                "generation_cancelled",
+                context_tokens=session.estimate_tokens(),
+            )
             continue
         except Exception as e:
             ui.cancel_stream()
             ui.show_error(f"Chat failed: {e}")
             logging.exception("Chat error")
+            timeline.record("chat_error", error=str(e))
             continue
 
         # Content was already rendered during streaming. Render thinking after,

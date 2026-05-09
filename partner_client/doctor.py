@@ -12,9 +12,9 @@ Designed to run before `partner --config <toml>` to surface misconfiguration
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Callable
+from typing import Callable, TextIO
 
 from .client import setup_scope_env
 from .config import Config
@@ -24,6 +24,12 @@ from .config import Config
 OK = "✓"
 FAIL = "✗"
 WARN = "⚠"
+
+_ASCII_STATUS = {
+    OK: "OK",
+    FAIL: "FAIL",
+    WARN: "WARN",
+}
 
 
 @dataclass
@@ -216,7 +222,7 @@ def _check_hub(config: Config) -> CheckResult | None:
     """If hub is configured, verify the vault path and inbox file exist."""
     if not config.hub.path:
         return None
-    hub_path = Path(config.hub.path).expanduser()
+    hub_path = config.resolve(config.hub.path)
     if not hub_path.is_dir():
         return CheckResult(
             name="Hub vault reachable",
@@ -246,7 +252,7 @@ def _check_wake_bundle(config: Config) -> CheckResult:
         from .memory import Memory
         memory = Memory(config)
         bundle = memory.assemble_wake_bundle()
-        size_kb = len(bundle.encode("utf-8")) / 1024
+        size_kb = len(bundle.system_prompt.encode("utf-8")) / 1024
         return CheckResult(
             name="Wake bundle assembles cleanly",
             status=OK,
@@ -340,16 +346,42 @@ _ALL_CHECKS: list[Callable[[Config], "CheckResult | list[CheckResult] | None"]] 
 # --- Runner ----------------------------------------------------------------
 
 
-def run_doctor(config: Config) -> int:
+def _status_labels_for_stream(stream: TextIO) -> dict[str, str]:
+    """Use Unicode status sigils only when the target stream can encode them."""
+    encoding = getattr(stream, "encoding", None) or "utf-8"
+    try:
+        (OK + FAIL + WARN).encode(encoding)
+    except (LookupError, UnicodeEncodeError):
+        return _ASCII_STATUS
+    return {OK: OK, FAIL: FAIL, WARN: WARN}
+
+
+def _safe_print(text: str = "", stream: TextIO | None = None) -> None:
+    """Print without crashing on legacy consoles with narrow encodings."""
+    if stream is None:
+        stream = sys.stdout
+    try:
+        print(text, file=stream)
+    except UnicodeEncodeError:
+        encoding = getattr(stream, "encoding", None) or "utf-8"
+        safe = text.encode(encoding, errors="replace").decode(encoding, errors="replace")
+        print(safe, file=stream)
+
+
+def run_doctor(config: Config, stream: TextIO | None = None) -> int:
     """Run all checks. Print results. Return 0 if no failures, 1 otherwise.
 
     Warnings don't fail the run; only outright failures do. The intent is
     that doctor is safe to run pre-flight: a healthy substrate exits 0, any
     blocking misconfiguration exits 1.
     """
-    print(f"{config.identity.name} — {config.model.name} @ {config.model.num_ctx:,} ctx")
-    print("Health check:")
-    print()
+    if stream is None:
+        stream = sys.stdout
+    status_labels = _status_labels_for_stream(stream)
+
+    _safe_print(f"{config.identity.name} — {config.model.name} @ {config.model.num_ctx:,} ctx", stream)
+    _safe_print("Health check:", stream)
+    _safe_print(stream=stream)
 
     any_fail = False
     any_warn = False
@@ -359,7 +391,10 @@ def run_doctor(config: Config) -> int:
             result = check_fn(config)
         except Exception as e:
             # A check itself crashing is a FAIL — surface it rather than swallow.
-            print(f"  {FAIL} {check_fn.__name__}: raised {type(e).__name__}: {e}")
+            _safe_print(
+                f"  {status_labels[FAIL]} {check_fn.__name__}: raised {type(e).__name__}: {e}",
+                stream,
+            )
             any_fail = True
             continue
 
@@ -368,25 +403,33 @@ def run_doctor(config: Config) -> int:
 
         results = result if isinstance(result, list) else [result]
         for r in results:
-            line = f"  {r.status} {r.name}"
+            line = f"  {status_labels.get(r.status, r.status)} {r.name}"
             if r.message:
                 line += f": {r.message}"
-            print(line)
+            _safe_print(line, stream)
             if r.status == FAIL:
                 any_fail = True
                 if r.hint:
-                    print(f"      hint: {r.hint}")
+                    _safe_print(f"      hint: {r.hint}", stream)
             elif r.status == WARN:
                 any_warn = True
                 if r.hint:
-                    print(f"      hint: {r.hint}")
+                    _safe_print(f"      hint: {r.hint}", stream)
 
-    print()
+    _safe_print(stream=stream)
     if any_fail:
-        print(f"{FAIL} One or more checks failed. Address them before running `partner --config <toml>`.")
+        _safe_print(
+            f"{status_labels[FAIL]} One or more checks failed. "
+            "Address them before running `partner --config <toml>`.",
+            stream,
+        )
         return 1
     if any_warn:
-        print(f"{WARN} All critical checks passed; some non-critical warnings noted above.")
+        _safe_print(
+            f"{status_labels[WARN]} All critical checks passed; "
+            "some non-critical warnings noted above.",
+            stream,
+        )
         return 0
-    print(f"{OK} All systems green. Run `partner --config <toml>` to wake.")
+    _safe_print(f"{status_labels[OK]} All systems green. Run `partner --config <toml>` to wake.", stream)
     return 0

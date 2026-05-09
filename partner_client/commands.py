@@ -39,6 +39,7 @@ class CommandRouter:
             "/files": ("List files in your memory directory (or pass a scope name: /files desktop).", self._cmd_files),
             "/scopes": ("Show all configured file scopes (memory, home, desktop, etc.).", self._cmd_scopes),
             "/intentions": ("Surface pending items from your Intentions.md (prospective memory).", self._cmd_intentions),
+            "/plans": ("List recent durable plans, or show one plan by id.", self._cmd_plans),
             "/reload-config": ("Re-read aletheia.toml without restart.", self._cmd_reload_config),
         }
 
@@ -161,6 +162,15 @@ class CommandRouter:
         return CommandResult(
             output=f"Intentions ({intentions_path}):\n\n{content}"
         )
+
+    def _cmd_plans(self, arg: str) -> CommandResult:
+        """Surface durable plan records from <memory_dir>/plans."""
+        from .plans import PlanStore
+        store = PlanStore(self.config)
+        plan_id = arg.strip()
+        if plan_id:
+            return CommandResult(output=store.format_detail(plan_id))
+        return CommandResult(output=store.format_recent())
 
     def _cmd_reload_config(self, arg: str) -> CommandResult:
         return CommandResult(
