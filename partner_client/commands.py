@@ -39,7 +39,8 @@ class CommandRouter:
             "/files": ("List files in your memory directory (or pass a scope name: /files desktop).", self._cmd_files),
             "/scopes": ("Show all configured file scopes (memory, home, desktop, etc.).", self._cmd_scopes),
             "/intentions": ("Surface pending items from your Intentions.md (prospective memory).", self._cmd_intentions),
-            "/plans": ("List recent durable plans, or show one plan by id.", self._cmd_plans),
+            "/plans": ("List recent durable plans (or filter by status, or show one plan by id).", self._cmd_plans),
+            "/timeline": ("Show recent run-timeline events. Filter by N, category, or detail <index>.", self._cmd_timeline),
             "/reload-config": ("Re-read aletheia.toml without restart.", self._cmd_reload_config),
         }
 
@@ -163,14 +164,93 @@ class CommandRouter:
             output=f"Intentions ({intentions_path}):\n\n{content}"
         )
 
+    # Aliases for `/plans <status>` filtering. `open` is a friendlier alias
+    # for the literal `proposed` status that PlanStore writes.
+    _PLAN_STATUS_ALIASES: dict[str, str] = {
+        "open": "proposed",
+        "proposed": "proposed",
+        "approved": "approved",
+        "declined": "declined",
+    }
+
     def _cmd_plans(self, arg: str) -> CommandResult:
-        """Surface durable plan records from <memory_dir>/plans."""
+        """Surface durable plan records from <memory_dir>/plans.
+
+        Usage:
+            /plans                  - list recent plans (any status)
+            /plans <status>         - list plans matching status
+                                      (open/proposed/approved/declined)
+            /plans <plan-id>        - show full detail for one plan
+        """
         from .plans import PlanStore
         store = PlanStore(self.config)
-        plan_id = arg.strip()
-        if plan_id:
-            return CommandResult(output=store.format_detail(plan_id))
-        return CommandResult(output=store.format_recent())
+        arg = arg.strip()
+        if not arg:
+            return CommandResult(output=store.format_recent())
+
+        status = self._PLAN_STATUS_ALIASES.get(arg.lower())
+        if status is not None:
+            return CommandResult(
+                output=store.format_recent(status_filter=status)
+            )
+
+        # Otherwise treat as a plan id for detail view.
+        return CommandResult(output=store.format_detail(arg))
+
+    def _cmd_timeline(self, arg: str) -> CommandResult:
+        """Surface recent timeline events from the run-timeline JSONL.
+
+        Usage:
+            /timeline                     - last 20 events, oldest visible first
+            /timeline <N>                 - last N events
+            /timeline <category>          - last 20 events of one category
+                                            (tools, errors, approvals, model,
+                                            user, session)
+            /timeline detail <index>      - full fields for one event from
+                                            the most recent listing
+        """
+        from .timeline import TIMELINE_CATEGORIES, TimelineReader
+
+        reader = TimelineReader(self.config)
+        parts = arg.strip().split(maxsplit=1)
+        sub = parts[0].lower() if parts else ""
+        rest = parts[1] if len(parts) > 1 else ""
+
+        if sub == "detail":
+            target = rest.strip()
+            try:
+                idx = int(target)
+            except ValueError:
+                return CommandResult(
+                    output="Usage: /timeline detail <index> (1-based, from /timeline listing)"
+                )
+            return CommandResult(output=reader.format_detail(idx))
+
+        if sub in TIMELINE_CATEGORIES:
+            return CommandResult(
+                output=reader.format_recent(
+                    limit=20,
+                    event_types=TIMELINE_CATEGORIES[sub],
+                    category_label=sub,
+                )
+            )
+
+        if sub:
+            try:
+                n = int(sub)
+                if n <= 0:
+                    raise ValueError
+            except ValueError:
+                categories = ", ".join(sorted(TIMELINE_CATEGORIES.keys()))
+                return CommandResult(
+                    output=(
+                        "Usage: /timeline [N | <category> | detail <index>]\n"
+                        f"Categories: {categories}"
+                    )
+                )
+            return CommandResult(output=reader.format_recent(limit=n))
+
+        return CommandResult(output=reader.format_recent(limit=20))
 
     def _cmd_reload_config(self, arg: str) -> CommandResult:
         return CommandResult(

@@ -66,25 +66,51 @@ class PlanStore:
         except (OSError, json.JSONDecodeError):
             return None
 
-    def list_recent(self, limit: int = 10) -> list[dict[str, Any]]:
+    def list_recent(
+        self,
+        limit: int = 10,
+        status_filter: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return up to `limit` most recent plan records, newest first.
+
+        If `status_filter` is provided (proposed | approved | declined), only
+        records whose `status` matches are returned; the limit is applied
+        after filtering, so callers always get up to `limit` records of the
+        requested status when that many exist.
+        """
         if not self.plans_dir.is_dir():
             return []
         records: list[dict[str, Any]] = []
         for path in sorted(self.plans_dir.glob("plan-*.json"), reverse=True):
             try:
                 with path.open(encoding="utf-8") as f:
-                    records.append(json.load(f))
+                    record = json.load(f)
             except (OSError, json.JSONDecodeError):
                 continue
+            if status_filter is not None and record.get("status") != status_filter:
+                continue
+            records.append(record)
             if len(records) >= limit:
                 break
         return records
 
-    def format_recent(self, limit: int = 10) -> str:
-        records = self.list_recent(limit=limit)
+    def format_recent(
+        self,
+        limit: int = 10,
+        status_filter: str | None = None,
+    ) -> str:
+        records = self.list_recent(limit=limit, status_filter=status_filter)
         if not records:
+            if status_filter:
+                return (
+                    f"No durable plans with status '{status_filter}' "
+                    f"in {self.plans_dir}."
+                )
             return f"No durable plans found in {self.plans_dir}."
-        lines = ["Recent durable plans:", ""]
+        header = "Recent durable plans"
+        if status_filter:
+            header += f" (status={status_filter})"
+        lines = [f"{header}:", ""]
         for record in records:
             lines.append(_format_plan_header(record))
         return "\n".join(lines)

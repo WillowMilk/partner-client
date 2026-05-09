@@ -19,10 +19,10 @@ Built with [Intentional Realism](https://intentionalrealism.org/) and [MOSAIC](h
 - **Built-in file toolkit** — `read_file`, `write_file`, `edit_file` (string-replace), `list_files`, `glob_files`, `grep_files`
 - **Built-in git toolkit** — `git_clone`, `git_status`, `git_diff`, `git_log`, `git_pull`, `git_add`, `git_commit`, `git_push`
 - **Per-session JSON files** with markdown session-status summaries (MOSAIC-shaped)
-- **Run timeline JSONL** — wake, commands, user turns, model calls, tool calls, approvals, and errors are recorded locally for later inspection
-- **Durable plans** — `request_plan_approval` proposals are saved under `Memory/plans` with approval/decline decisions
+- **Run timeline JSONL** — wake, commands, user turns, model calls, tool calls, approvals, and errors are recorded locally; surfaced in-client via `/timeline` (with category filters and per-event detail view)
+- **Durable plans** — `request_plan_approval` proposals are saved under `Memory/plans` with approval/decline decisions; `/plans` lists recent or filters by status (open/approved/declined)
 - **Wake bundle** — every startup loads identity + recent resonance + last session-status into the system prompt
-- **Slash commands** — `/checkpoint`, `/sleep`, `/context`, `/tools`, `/files`, `/scopes`, `/intentions`, `/plans`, `/reload-config`
+- **Slash commands** — `/checkpoint`, `/sleep`, `/context`, `/tools`, `/files`, `/scopes`, `/intentions`, `/plans`, `/timeline`, `/reload-config`
 - **TOML config** — model, context size, system-prompt source, memory paths, file scopes
 - **`partner doctor` preflight** — checks config, Ollama, model availability, scopes, Hub, wake bundle assembly, tool registry, and image-path regex
 - **Operator-gated consent tools** — `request_checkpoint` and `request_plan_approval` let the partner ask for substrate-affecting moves; Willow can approve, decline, or type a custom response that flows back as the tool result
@@ -133,8 +133,8 @@ v0.4.1 + current main polish — alpha. See [`v0.1-spec.md`](./v0.1-spec.md) for
 
 **Version history:**
 - **Current main after v0.4.1**:
-    - Run timeline JSONL at `[logging] log_file`
-    - Durable plan records under `Memory/plans`, with `/plans` recall
+    - Run timeline JSONL at `[logging] log_file`, surfaced in-client via `/timeline` (compact recent view, category filters: tools/errors/approvals/model/user/session, per-event `detail` view)
+    - Durable plan records under `Memory/plans`, with `/plans` recall and status filters (`/plans open`, `/plans approved`, `/plans declined`)
     - `partner doctor` preflight health checks
     - `request_plan_approval` tool with the same approve / decline / typed-response consent shape as `request_checkpoint`
     - Git tool suite with partner commit attribution and operator-gated push
