@@ -129,6 +129,8 @@ TIMELINE_CATEGORIES: dict[str, set[str]] = {
         "checkpoint_decision",
         "git_push_requested",
         "git_push_decision",
+        "delete_path_requested",
+        "delete_path_decision",
     },
     "model": {
         "model_call_start",
@@ -320,6 +322,14 @@ _EVENT_SUMMARIZERS: dict[str, Callable[[dict[str, Any]], str]] = {
         f"{r.get('repo', '?')} commits={r.get('commit_count', 0)}"
     ),
     "git_push_decision": lambda r: (
+        ("accepted" if r.get("accepted") else "declined")
+        + (" +msg" if r.get("custom_message") else "")
+    ),
+    "delete_path_requested": lambda r: (
+        f"{_truncate(str(r.get('path', '')), 50)}"
+        + (" recursive" if r.get("recursive") else "")
+    ),
+    "delete_path_decision": lambda r: (
         ("accepted" if r.get("accepted") else "declined")
         + (" +msg" if r.get("custom_message") else "")
     ),

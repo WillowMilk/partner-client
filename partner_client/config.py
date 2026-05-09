@@ -94,6 +94,7 @@ class ToolsConfig:
     enabled: list[str] = field(default_factory=lambda: [
         "read_file", "write_file", "edit_file", "list_files",
         "glob_files", "grep_files",
+        "move_path", "delete_path",
         "search_web", "fetch_page", "weather",
         "hub_send", "hub_check_inbox", "hub_read_letter",
         "request_checkpoint", "request_plan_approval",

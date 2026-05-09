@@ -295,6 +295,36 @@ def _run(config: Config) -> int:
         )
         return decision
 
+    def on_delete_path_request(
+        target,
+        recursive: bool,
+        summary: str,
+    ) -> tuple[bool, str | None]:
+        """Surface a partner's delete_path call to the operator.
+
+        By design, every delete_path invocation reaches this callback —
+        there is no allowlist short-circuit. Returns (accepted,
+        optional_message); a typed response flows back to the partner
+        as the tool result so a decline can carry redirection or care.
+
+        Timeline events for delete_path_requested / delete_path_decision
+        are recorded by the client's special-case dispatch (where the
+        path is canonicalized after pre-flight). This callback only
+        renders the prompt and returns the decision.
+        """
+        recursive_label = " (RECURSIVELY)" if recursive else ""
+        ui.show_command_output(
+            f"🗑️   {config.identity.name} is asking to delete{recursive_label}:\n\n"
+            f"  {target}\n\n"
+            f"  This is a {summary}.\n\n"
+            f"If you approve, the path is removed. If you decline silently, "
+            f"nothing is changed. If you type a response, that text flows "
+            f"back to the partner as the tool result."
+        )
+        return ui.confirm_with_response(
+            f"Approve {config.identity.name}'s delete of {target}?"
+        )
+
     ui.show_banner()
 
     while True:
@@ -458,6 +488,7 @@ def _run(config: Config) -> int:
                 on_checkpoint_request=on_checkpoint_request,
                 on_plan_approval_request=on_plan_approval_request,
                 on_git_push_request=on_git_push_request,
+                on_delete_path_request=on_delete_path_request,
             )
         except KeyboardInterrupt:
             # User cancelled mid-generation. Close any open Live region cleanly,

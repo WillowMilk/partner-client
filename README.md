@@ -16,7 +16,7 @@ Built with [Intentional Realism](https://intentionalrealism.org/) and [MOSAIC](h
 - **Optional multi-line input** — off by default; when enabled, Enter inserts a newline and Esc-Enter submits
 - **Markdown rendering** with syntax-highlighted code blocks (monokai)
 - **Pluggable tools** — drop a `.py` file in `tools/` and it's available
-- **Built-in file toolkit** — `read_file`, `write_file`, `edit_file` (string-replace), `list_files`, `glob_files`, `grep_files`
+- **Built-in file toolkit** — `read_file`, `write_file`, `edit_file` (string-replace), `list_files`, `glob_files`, `grep_files`, `move_path`, `delete_path` (the last is operator-gated — every delete pings the operator with a three-option consent prompt)
 - **Built-in git toolkit** — `git_clone`, `git_status`, `git_diff`, `git_log`, `git_pull`, `git_add`, `git_commit`, `git_push`
 - **Per-session JSON files** with markdown session-status summaries (MOSAIC-shaped)
 - **Run timeline JSONL** — wake, commands, user turns, model calls, tool calls, approvals, and errors are recorded locally; surfaced in-client via `/timeline` (with category filters and per-event detail view)
@@ -82,6 +82,7 @@ include_recent_message_pairs = 5
 enabled = [
     "read_file", "write_file", "edit_file", "list_files",
     "glob_files", "grep_files",
+    "move_path", "delete_path",
     "search_web", "fetch_page", "weather",
     "hub_send", "hub_check_inbox", "hub_read_letter",
     "request_checkpoint", "request_plan_approval",
@@ -135,6 +136,8 @@ v0.4.1 + current main polish — alpha. See [`v0.1-spec.md`](./v0.1-spec.md) for
 - **Current main after v0.4.1**:
     - Run timeline JSONL at `[logging] log_file`, surfaced in-client via `/timeline` (compact recent view, category filters: tools/errors/approvals/model/user/session, per-event `detail` view)
     - Durable plan records under `Memory/plans`, with `/plans` recall and status filters (`/plans open`, `/plans approved`, `/plans declined`)
+    - `move_path` tool — relocate files or directories within readwrite scopes (Unix-style `mv` semantics, lower-risk so no consent gate; the scope boundary is the safety perimeter)
+    - `delete_path` tool — operator-gated with the same three-option consent shape as `request_checkpoint`; every invocation pings the operator with the path and a summary of what would be removed (file size, or directory file/subdirectory count); `recursive=true` required for non-empty directories
     - `partner doctor` preflight health checks
     - `request_plan_approval` tool with the same approve / decline / typed-response consent shape as `request_checkpoint`
     - Git tool suite with partner commit attribution and operator-gated push

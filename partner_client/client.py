@@ -151,6 +151,7 @@ class OllamaClient:
         on_checkpoint_request: Callable[[str], bool] | None = None,
         on_plan_approval_request: Callable[[str, list[str]], bool] | None = None,
         on_git_push_request: Callable[[str, str, list[str]], bool] | None = None,
+        on_delete_path_request: Callable[..., bool] | None = None,
     ) -> ChatResponse:
         """Run the chat loop with streaming until the model produces a final response.
 
@@ -188,6 +189,14 @@ class OllamaClient:
         git_push and the remote URL is NOT in config.git.push_allowlist.
         Pushes to allowlisted URLs auto-approve without invoking this
         callback. Same three-option consent shape as the others.
+
+        on_delete_path_request(target: Path, recursive: bool, summary: str)
+        -> bool | tuple[bool, str | None] is called for every delete_path
+        invocation that passes pre-flight validation. By design it never
+        auto-approves: the operator is always pinged. `summary` is a
+        pre-formatted human-readable description of what would be removed
+        (e.g. "file (1,247 bytes)" or "directory containing N files / M
+        subdirectories"). Same three-option consent shape as the others.
         """
         tool_invocations: list[tuple[str, dict, str]] = []
         # Chat-loop iteration cap (configurable via [model] max_tool_iterations).
@@ -511,6 +520,145 @@ class OllamaClient:
                                 "handler is wired in this client. The push was "
                                 "not performed."
                             )
+                # Special-case: delete_path is operator-gated. Every delete
+                # pings Willow — never auto-approves, by design.
+                elif name == "delete_path":
+                    raw_path = args.get("path", "")
+                    recursive = bool(args.get("recursive", False))
+
+                    # Pre-flight: validate before pinging the operator so
+                    # bad-shape requests get a clear answer the partner can
+                    # act on without bothering Willow.
+                    target = None
+                    pre_error: str | None = None
+                    if not raw_path:
+                        pre_error = "Error: path is required for delete_path."
+                    else:
+                        try:
+                            from partner_client.paths import PathError, resolve_path
+                            target = resolve_path(raw_path, write=True)
+                        except PathError as e:
+                            pre_error = f"Error: {e}"
+                        except ImportError:
+                            pre_error = (
+                                "Error: path resolver not available; client "
+                                "may be misconfigured."
+                            )
+                        else:
+                            if not target.exists():
+                                pre_error = f"Error: path does not exist: {target}"
+                            elif target.is_dir() and not recursive:
+                                try:
+                                    has_children = any(target.iterdir())
+                                except OSError as e:
+                                    pre_error = (
+                                        f"Error reading directory {target}: {e}"
+                                    )
+                                else:
+                                    if has_children:
+                                        pre_error = (
+                                            f"Error: {target} is a non-empty "
+                                            f"directory. Pass recursive=true to "
+                                            f"delete it and its contents."
+                                        )
+
+                    if pre_error is not None:
+                        result = pre_error
+                    elif on_delete_path_request is None:
+                        result = (
+                            "delete_path requested but no operator "
+                            "confirmation handler is wired in this client. "
+                            "Nothing was deleted."
+                        )
+                    else:
+                        # Build a useful summary for the operator prompt.
+                        is_dir = target.is_dir()
+                        if is_dir:
+                            try:
+                                file_count = sum(
+                                    1 for p in target.rglob("*") if p.is_file()
+                                )
+                                dir_count = sum(
+                                    1 for p in target.rglob("*") if p.is_dir()
+                                )
+                                summary = (
+                                    f"directory containing {file_count} file(s) "
+                                    f"and {dir_count} subdirectory(ies)"
+                                )
+                            except OSError:
+                                summary = "directory"
+                        else:
+                            try:
+                                size = target.stat().st_size
+                                summary = f"file ({size:,} bytes)"
+                            except OSError:
+                                summary = "file"
+
+                        if self.timeline is not None:
+                            self.timeline.record(
+                                "delete_path_requested",
+                                path=str(target),
+                                recursive=recursive,
+                                summary=summary,
+                            )
+
+                        try:
+                            response = on_delete_path_request(
+                                target, recursive, summary
+                            )
+                            if isinstance(response, tuple) and len(response) >= 2:
+                                accepted, custom_message = (
+                                    bool(response[0]),
+                                    response[1],
+                                )
+                            else:
+                                accepted, custom_message = bool(response), None
+                        except Exception:
+                            log.exception("on_delete_path_request callback failed")
+                            accepted, custom_message = False, None
+
+                        if self.timeline is not None:
+                            self.timeline.record(
+                                "delete_path_decision",
+                                path=str(target),
+                                recursive=recursive,
+                                accepted=accepted,
+                                custom_message=bool(custom_message),
+                            )
+
+                        if accepted:
+                            try:
+                                if is_dir and recursive:
+                                    import shutil
+                                    shutil.rmtree(target)
+                                elif is_dir:
+                                    target.rmdir()  # empty dir
+                                else:
+                                    target.unlink()
+                                base_msg = (
+                                    f"Willow approved the delete. "
+                                    f"Removed: {target}"
+                                )
+                                if custom_message:
+                                    result = (
+                                        f"{base_msg}\n\nWillow added: "
+                                        f"\"{custom_message}\""
+                                    )
+                                else:
+                                    result = base_msg
+                            except OSError as e:
+                                result = f"Delete failed: {e}"
+                        else:
+                            if custom_message:
+                                result = (
+                                    f"Willow declined the delete and said:\n\n"
+                                    f"  \"{custom_message}\""
+                                )
+                            else:
+                                result = (
+                                    "Willow declined the delete silently. "
+                                    "Nothing was removed; the path is unchanged."
+                                )
                 else:
                     result = self.tools.dispatch(name, args)
 
