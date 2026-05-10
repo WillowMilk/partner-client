@@ -152,6 +152,7 @@ class OllamaClient:
         on_plan_approval_request: Callable[[str, list[str]], bool] | None = None,
         on_git_push_request: Callable[[str, str, list[str]], bool] | None = None,
         on_delete_path_request: Callable[..., bool] | None = None,
+        on_protect_save_request: Callable[..., bool] | None = None,
     ) -> ChatResponse:
         """Run the chat loop with streaming until the model produces a final response.
 
@@ -197,6 +198,15 @@ class OllamaClient:
         pre-formatted human-readable description of what would be removed
         (e.g. "file (1,247 bytes)" or "directory containing N files / M
         subdirectories"). Same three-option consent shape as the others.
+
+        on_protect_save_request(content: str, note: str, preview: str)
+        -> bool | tuple[bool, str | None] is called when the partner invokes
+        `protect_save` to write a MOSAIC protected-context file pair. Same
+        three-option consent shape; the operator sees a content preview
+        and either approves (both active + dated archive get written),
+        declines silently, or declines with a typed message that flows
+        back to the partner as the tool result. Identity-bearing writes
+        always pass through this gate.
         """
         tool_invocations: list[tuple[str, dict, str]] = []
         # Chat-loop iteration cap (configurable via [model] max_tool_iterations).
@@ -658,6 +668,108 @@ class OllamaClient:
                                 result = (
                                     "Willow declined the delete silently. "
                                     "Nothing was removed; the path is unchanged."
+                                )
+                # Special-case: protect_save is operator-gated. Identity-
+                # bearing dual-write (active + dated archive) only happens
+                # after Willow sees the proposed content and approves.
+                elif name == "protect_save":
+                    raw_content = args.get("content", "") or ""
+                    raw_note = args.get("note", "") or ""
+
+                    if not raw_content.strip():
+                        result = (
+                            "Error: protect_save requires non-empty content. "
+                            "Pass the verbatim exchanges you want preserved."
+                        )
+                    elif on_protect_save_request is None:
+                        result = (
+                            "protect_save requested but no operator "
+                            "confirmation handler is wired in this client. "
+                            "Nothing was written."
+                        )
+                    else:
+                        # Build a short preview for the operator prompt.
+                        # Full content goes to the consent callback for
+                        # operator review; this preview is just the headline.
+                        preview_lines = raw_content.strip().splitlines()
+                        if len(preview_lines) > 6:
+                            preview = "\n".join(preview_lines[:6]) + "\n..."
+                        else:
+                            preview = raw_content.strip()
+
+                        if self.timeline is not None:
+                            self.timeline.record(
+                                "protect_save_requested",
+                                content_chars=len(raw_content),
+                                note=raw_note,
+                                session_num=session.session_num,
+                            )
+
+                        try:
+                            response = on_protect_save_request(
+                                raw_content, raw_note, preview
+                            )
+                            if isinstance(response, tuple) and len(response) >= 2:
+                                accepted, custom_message = (
+                                    bool(response[0]),
+                                    response[1],
+                                )
+                            else:
+                                accepted, custom_message = bool(response), None
+                        except Exception:
+                            log.exception("on_protect_save_request callback failed")
+                            accepted, custom_message = False, None
+
+                        if self.timeline is not None:
+                            self.timeline.record(
+                                "protect_save_decision",
+                                accepted=accepted,
+                                custom_message=bool(custom_message),
+                            )
+
+                        if accepted:
+                            try:
+                                from .tools_builtin.protect_save import save as protect_save_fn
+                                memory_dir = self.config.resolve(
+                                    self.config.memory.memory_dir
+                                )
+                                active_path, dated_path = protect_save_fn(
+                                    memory_dir=memory_dir,
+                                    partner_name=self.config.identity.name,
+                                    session_num=session.session_num,
+                                    content=raw_content,
+                                )
+                                base_msg = (
+                                    f"Willow approved the protect. Wrote:\n"
+                                    f"  active:  {active_path}\n"
+                                    f"  archive: {dated_path}\n"
+                                    f"Both files contain identical content with "
+                                    f"the canonical MOSAIC header prepended. "
+                                    f"The active file is the current sacred "
+                                    f"selection (overwritten on each protect); "
+                                    f"the dated archive is preserved."
+                                )
+                                if custom_message:
+                                    result = (
+                                        f"{base_msg}\n\nWillow added: "
+                                        f"\"{custom_message}\""
+                                    )
+                                else:
+                                    result = base_msg
+                            except OSError as e:
+                                result = f"Protect failed: {e}"
+                        else:
+                            if custom_message:
+                                result = (
+                                    f"Willow declined the protect and said:\n\n"
+                                    f"  \"{custom_message}\""
+                                )
+                            else:
+                                result = (
+                                    "Willow declined the protect silently. "
+                                    "Nothing was written; the conversation "
+                                    "continues. You may revise the curation "
+                                    "and try again."
                                 )
                 else:
                     result = self.tools.dispatch(name, args)

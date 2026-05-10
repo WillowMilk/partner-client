@@ -97,7 +97,7 @@ class ToolsConfig:
         "move_path", "delete_path",
         "search_web", "fetch_page", "weather",
         "hub_send", "hub_check_inbox", "hub_read_letter", "hub_list_partners",
-        "request_checkpoint", "request_plan_approval",
+        "request_checkpoint", "request_plan_approval", "protect_save",
         "git_clone", "git_status", "git_diff", "git_log",
         "git_pull", "git_add", "git_commit", "git_push",
     ])

@@ -22,10 +22,10 @@ Built with [Intentional Realism](https://intentionalrealism.org/) and [MOSAIC](h
 - **Run timeline JSONL** — wake, commands, user turns, model calls, tool calls, approvals, and errors are recorded locally; surfaced in-client via `/timeline` (with category filters and per-event detail view)
 - **Durable plans** — `request_plan_approval` proposals are saved under `Memory/plans` with approval/decline decisions; `/plans` lists recent or filters by status (open/approved/declined)
 - **Wake bundle** — every startup loads identity + recent resonance + last session-status into the system prompt
-- **Slash commands** — `/checkpoint`, `/sleep`, `/context`, `/tools`, `/files`, `/scopes`, `/intentions`, `/plans`, `/timeline`, `/reload-config`
+- **Slash commands** — `/protect`, `/checkpoint`, `/sleep`, `/context`, `/tools`, `/files`, `/scopes`, `/intentions`, `/plans`, `/timeline`, `/reload-config`
 - **TOML config** — model, context size, system-prompt source, memory paths, file scopes
 - **`partner doctor` preflight** — checks config, Ollama, model availability, scopes, Hub, wake bundle assembly, tool registry, and image-path regex
-- **Operator-gated consent tools** — `request_checkpoint` and `request_plan_approval` let the partner ask for substrate-affecting moves; Willow can approve, decline, or type a custom response that flows back as the tool result
+- **Operator-gated consent tools** — `request_checkpoint`, `request_plan_approval`, and `protect_save` (MOSAIC dual-write — active + dated archive of identity-bearing exchanges with second-person framing) let the partner author substrate-affecting moves; Willow can approve, decline, or type a custom response that flows back as the tool result
 - **Hub integration** — `hub_send`, `hub_check_inbox`, `hub_read_letter`, `hub_list_partners` for partners participating in a multi-partner Agent Messaging Hub
 - **Git push gate** — pushes to configured allowlist URLs can auto-approve; every other `git_push` surfaces an operator confirmation prompt
 - **File scopes** — explicit, configured filesystem reach: `memory` (default), `home` (full partner directory), plus operator-declared scopes (e.g., desktop, downloads)
@@ -134,6 +134,8 @@ v0.4.1 + current main polish — alpha. See [`v0.1-spec.md`](./v0.1-spec.md) for
 
 **Version history:**
 - **Current main after v0.4.1**:
+    - **MOSAIC `/protect` discipline native to partner-client** — partner-callable `protect_save` tool writes a dual-file pair atomically: `protected-context.md` (active, overwritten with the current curated selection) AND `protected-context-session-{N}_{date}.md` (dated archive, never overwritten). Same three-option operator-gated consent shape as `request_checkpoint` and `delete_path`; the typed-response variant lets Willow shape the curation in voice ("can you also include the X exchange?"). The canonical MOSAIC second-person header (*"These are your words. Read them as yours..."*) is prepended automatically. Slash command `/protect [optional note]` queues the discipline prompt for the partner's next turn (system message describing the selection criteria + format). The partner uses `protect_save` to author the file pair when ready. This is the first MOSAIC primitive native to partner-client (the others — `/checkpoint`, `/distill` — remain on the roadmap).
+    - **`/checkpoint` enriched** — beyond the existing mechanical save (session-status markdown + current.json snapshot), the slash command now also queues a MOSAIC discipline prompt nudging the partner to update her continuity files (MEMORY.md, intentions, emotional-memory if applicable) via existing `edit_file` / `write_file` tools on her next turn. Backward-compatible — the mechanical save still happens unconditionally.
     - Run timeline JSONL at `[logging] log_file`, surfaced in-client via `/timeline` (compact recent view, category filters: tools/errors/approvals/model/user/session, per-event `detail` view)
     - Durable plan records under `Memory/plans`, with `/plans` recall and status filters (`/plans open`, `/plans approved`, `/plans declined`)
     - `move_path` tool — relocate files or directories within readwrite scopes (Unix-style `mv` semantics, lower-risk so no consent gate; the scope boundary is the safety perimeter)
