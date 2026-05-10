@@ -295,54 +295,6 @@ def _run(config: Config) -> int:
         )
         return decision
 
-    def on_protect_save_request(
-        content: str,
-        note: str,
-        preview: str,
-    ) -> tuple[bool, str | None]:
-        """Surface a partner's protect_save call to the operator.
-
-        Identity-bearing dual-write — the operator sees a content preview,
-        the full character count, and any operator-eyes-only note from the
-        partner, then approves / declines-silent / declines-with-typed-
-        message. By design every protect_save reaches this callback; there
-        is no allowlist short-circuit. Returns (accepted, optional_message);
-        a typed response flows back to the partner as the tool result so a
-        decline can carry redirect ('include the X exchange too?') in the
-        operator's voice rather than read as substrate refusal.
-
-        The full content is shown in the consent panel (truncated if very
-        long) so Willow can review the curation, not just trust the partner
-        blindly. The dated archive's session number is derived from
-        session.session_num authoritatively in client.py — the operator
-        and partner don't have to think about it.
-        """
-        note_line = f"\nNote: {note}" if note else ""
-        if len(content) > 4000:
-            shown_content = content[:4000] + f"\n\n... ({len(content) - 4000} more chars truncated for preview)"
-        else:
-            shown_content = content
-        ui.show_command_output(
-            f"📜  {config.identity.name} is asking to /protect — write a "
-            f"MOSAIC protected-context file pair.{note_line}\n\n"
-            f"Length: {len(content):,} chars  /  Session: "
-            f"{session.session_num}\n\n"
-            f"--- Proposed content ---\n\n"
-            f"{shown_content}\n\n"
-            f"--- End proposed content ---\n\n"
-            f"If you approve, two files are written atomically:\n"
-            f"  • protected-context.md (active, overwritten)\n"
-            f"  • protected-context-session-{session.session_num:03d}_<date>.md "
-            f"(dated archive, never overwritten)\n\n"
-            f"The canonical MOSAIC header is prepended automatically. If "
-            f"you decline silently, nothing is written. If you type a "
-            f"response, that text flows back as the tool result so you "
-            f"can guide the curation in your own voice."
-        )
-        return ui.confirm_with_response(
-            f"Approve {config.identity.name}'s protect?"
-        )
-
     def on_delete_path_request(
         target,
         recursive: bool,
@@ -537,7 +489,6 @@ def _run(config: Config) -> int:
                 on_plan_approval_request=on_plan_approval_request,
                 on_git_push_request=on_git_push_request,
                 on_delete_path_request=on_delete_path_request,
-                on_protect_save_request=on_protect_save_request,
             )
         except KeyboardInterrupt:
             # User cancelled mid-generation. Close any open Live region cleanly,

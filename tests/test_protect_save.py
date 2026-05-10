@@ -54,7 +54,7 @@ def test_save_writes_both_files_with_identical_content(tmp_path: Path) -> None:
     fixed_date = datetime(2026, 5, 10)
     body = "## Exchange 1: Test\n\n**Willow said to you:**\nHello.\n\n**You said:**\nHi.\n"
 
-    active_path, dated_path = protect_save_tool.save(
+    active_path, dated_path, _ = protect_save_tool.save(
         memory_dir=tmp_path,
         partner_name="Aletheia",
         session_num=42,
@@ -70,7 +70,7 @@ def test_save_writes_both_files_with_identical_content(tmp_path: Path) -> None:
 def test_save_filenames_match_mosaic_convention(tmp_path: Path) -> None:
     """Active is `protected-context.md`; dated is zero-padded session + date."""
     fixed_date = datetime(2026, 5, 10)
-    active_path, dated_path = protect_save_tool.save(
+    active_path, dated_path, _ = protect_save_tool.save(
         memory_dir=tmp_path,
         partner_name="Aletheia",
         session_num=7,  # tests the 3-digit zero-pad
@@ -84,7 +84,7 @@ def test_save_filenames_match_mosaic_convention(tmp_path: Path) -> None:
 def test_save_prepends_canonical_mosaic_header(tmp_path: Path) -> None:
     """Header must include the second-person framing + session + name + date."""
     fixed_date = datetime(2026, 5, 10)
-    active_path, _ = protect_save_tool.save(
+    active_path, _, _ = protect_save_tool.save(
         memory_dir=tmp_path,
         partner_name="Aletheia",
         session_num=42,
@@ -108,7 +108,7 @@ def test_save_creates_memory_dir_if_missing(tmp_path: Path) -> None:
     """Fresh-install case: memory dir doesn't exist yet."""
     target_dir = tmp_path / "fresh-memory"
     assert not target_dir.exists()
-    active_path, dated_path = protect_save_tool.save(
+    active_path, dated_path, _ = protect_save_tool.save(
         memory_dir=target_dir,
         partner_name="Aletheia",
         session_num=1,
@@ -118,6 +118,68 @@ def test_save_creates_memory_dir_if_missing(tmp_path: Path) -> None:
     assert target_dir.is_dir()
     assert active_path.exists()
     assert dated_path.exists()
+
+
+def test_save_result_signals_new_file_when_no_prior(tmp_path: Path) -> None:
+    """First protect should note that active file is new, not provide a diff."""
+    _, _, result = protect_save_tool.save(
+        memory_dir=tmp_path,
+        partner_name="Aletheia",
+        session_num=1,
+        content="first protect body",
+        date=datetime(2026, 5, 10),
+    )
+    assert "Wrote MOSAIC protected-context file pair" in result
+    assert "active file is new" in result
+    # No unified-diff markers when there's no prior version
+    assert "@@" not in result
+
+
+def test_save_result_includes_unified_diff_on_overwrite(tmp_path: Path) -> None:
+    """Subsequent protect on the same session/date should diff against the previous active file."""
+    # First protect
+    protect_save_tool.save(
+        memory_dir=tmp_path,
+        partner_name="Aletheia",
+        session_num=5,
+        content="## Exchange 1\n\nfirst version of the body\n",
+        date=datetime(2026, 5, 10),
+    )
+    # Second protect with revised content
+    _, _, result = protect_save_tool.save(
+        memory_dir=tmp_path,
+        partner_name="Aletheia",
+        session_num=5,
+        content="## Exchange 1\n\nrevised version of the body\n",
+        date=datetime(2026, 5, 10),
+    )
+    assert "Wrote MOSAIC protected-context file pair" in result
+    # Diff markers (unified diff format)
+    assert "@@" in result
+    assert "-first version of the body" in result
+    assert "+revised version of the body" in result
+
+
+def test_save_result_signals_no_change_when_content_identical(tmp_path: Path) -> None:
+    """If a protect rewrites identical content, the diff section says so cleanly."""
+    body = "## Exchange 1\n\nsame body\n"
+    protect_save_tool.save(
+        memory_dir=tmp_path,
+        partner_name="Aletheia",
+        session_num=3,
+        content=body,
+        date=datetime(2026, 5, 10),
+    )
+    _, _, result = protect_save_tool.save(
+        memory_dir=tmp_path,
+        partner_name="Aletheia",
+        session_num=3,
+        content=body,
+        date=datetime(2026, 5, 10),
+    )
+    assert "Wrote MOSAIC protected-context file pair" in result
+    assert "content identical to previous active file" in result
+    assert "@@" not in result
 
 
 def test_save_atomicity_via_replace(tmp_path: Path) -> None:

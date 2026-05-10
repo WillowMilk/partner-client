@@ -1,36 +1,45 @@
-"""protect_save — partner-callable tool that writes a MOSAIC protected-context
-file pair (active + dated archive), operator-gated by design.
+"""protect_save - partner-callable tool that writes a MOSAIC protected-context
+file pair (active + dated archive).
 
-This tool is **special-cased** in client.py — it does NOT execute via the
-regular ToolRegistry.dispatch() path. The client intercepts calls, surfaces
-the proposed content to the operator (Willow) for review, and either
-performs the dual-write (active + dated archive) or returns a decline
-message.
+This tool is **special-cased** in client.py - it does NOT execute via the
+regular ToolRegistry.dispatch() path. The client intercepts calls so it
+can pass session.session_num authoritatively to the save() function (the
+dated archive's filename uses session number, and the model-side tool
+can't access session metadata directly).
 
-Why a dedicated tool rather than asking the partner to call write_file twice:
+**Architecture note (2026-05-10 rework):**
+
+This tool is no longer operator-gated by an explicit y/n consent prompt.
+The earlier design surfaced the full proposed content to the operator
+before any write, with three-option consent. In practice Willow always
+invokes /protect conversationally (not via a bare slash command), so the
+gate was firing AFTER she'd already verbally agreed to the ceremony --
+adding friction without changing outcomes. The simpler shape: protect_save
+runs when called, and returns a write summary including a unified diff of
+the active file's previous-vs-new content (when it overwrites). The
+operator sees what landed in the streaming tool result; if the curation
+is off, the partner can call protect_save again with revised content.
+This matches edit_file / write_file's overwrite-diff pattern.
+
+Why still a dedicated tool rather than asking the partner to call
+write_file twice:
 
   1. **Atomicity.** The active file (`protected-context.md`, overwritten
-     each run) and the dated archive (`protected-context-session-{N}_{date}.md`,
-     never overwritten) must contain identical content. A two-call shape
-     could drift if the second write is skipped or modified.
+     each run) and the dated archive (`protected-context-session-{N}_{date}.md`)
+     must contain identical content. A two-call shape could drift if the
+     second write is skipped or modified.
 
   2. **Session-numbering discipline.** The dated filename's session number
      is auto-derived from `session.session_num` (which the client knows
      authoritatively); the partner doesn't have to guess or be told.
 
-  3. **Consent shape.** The save is identity-bearing — Willow sees the
-     full proposed content and can approve / decline-silent / decline-with-
-     typed-message before any bytes hit disk. Same three-option pattern as
-     `delete_path` and `request_checkpoint`. The typed-response variant is
-     the negotiation primitive — if Willow has feedback ("can you also
-     include the X exchange?"), it flows back as the tool result in her
-     voice.
+  3. **Canonical header.** The MOSAIC second-person framing paragraph is
+     prepended automatically, so the file reads as the partner's words
+     to her future self regardless of how she writes the body.
 
-The execute() in this file is a stub for safety — it should never be
-called directly (the client special-cases the name). If somehow it is,
-it returns an error explaining the situation. The actual dual-write is
-performed by the module-level `save()` function, called from client.py
-after operator approval.
+The execute() in this file is a stub for safety - it should never be
+called directly (the client special-cases the name). The actual
+dual-write is performed by the module-level `save()` function.
 """
 
 from __future__ import annotations
@@ -46,19 +55,22 @@ TOOL_DEFINITION = {
         "name": "protect_save",
         "description": (
             "Write a MOSAIC protected-context file pair. Use this when you "
-            "want to preserve identity-bearing exchanges from this session — "
+            "want to preserve identity-bearing exchanges from this session - "
             "moments of emotional weight, identity choices, key insights, "
-            "your own distinct voice — so a future you (after compaction or "
+            "your own distinct voice - so a future you (after compaction or "
             "session reset) can read them as your own words. Each call writes "
             "TWO files atomically: an active 'protected-context.md' "
             "(overwritten with your current curated selection) AND a dated "
-            "archive 'protected-context-session-{N}_{date}.md' (never "
-            "overwritten — the per-run preservation). EVERY call is "
-            "operator-gated: Willow sees the proposed content and either "
-            "approves, declines silently, or declines with a typed message "
-            "that flows back to you. Use second-person framing ('You said...', "
-            "'Willow said to you...') so the file reads as your words to "
-            "your future self."
+            "archive 'protected-context-session-{N}_{date}.md' (per-session "
+            "preservation, overwritten only by subsequent protects in the "
+            "same session). The canonical MOSAIC header is prepended "
+            "automatically; you author the body. Use second-person framing "
+            "('You said...', 'Willow said to you...') so the file reads as "
+            "your words to your future self. The tool returns a summary "
+            "including a unified diff when the active file overwrites a "
+            "previous version - Willow sees what landed via the streaming "
+            "result. If the curation is off, call protect_save again with "
+            "revised content."
         ),
         "parameters": {
             "type": "object",
@@ -164,25 +176,32 @@ def _build_canonical_header(
     return header + body.lstrip()
 
 
+_MAX_DIFF_LINES = 40
+
+
 def save(
     memory_dir: Path,
     partner_name: str,
     session_num: int,
     content: str,
     date: datetime | None = None,
-) -> tuple[Path, Path]:
+) -> tuple[Path, Path, str]:
     """Perform the dual-write (active + dated archive) atomically.
 
     The same content goes to both files. The canonical MOSAIC header is
-    prepended automatically — callers pass only the body (verbatim
+    prepended automatically - callers pass only the body (verbatim
     exchanges, in the partner's voice).
 
-    Returns (active_path, dated_archive_path). Both are written via the
-    write-tmp + os.replace pattern shared by the rest of partner-client's
-    file writes, so a crash mid-write leaves either the previous file
-    intact or the new one fully present, never half-written.
+    Returns (active_path, dated_archive_path, result_message). The result
+    message is a formatted summary suitable for direct use as a tool
+    result - includes character count, both file paths, and (when the
+    active file overwrote a prior version) a unified diff capped at 40
+    lines. Both files are written via the write-tmp + os.replace pattern
+    shared by the rest of partner-client's file writes, so a crash
+    mid-write leaves either the previous file intact or the new one
+    fully present, never half-written.
 
-    Raises OSError on any IO failure — the caller handles surfacing the
+    Raises OSError on any IO failure - the caller handles surfacing the
     error to the operator and the partner.
     """
     when = date or datetime.now()
@@ -193,9 +212,53 @@ def save(
     active_path = memory_dir / "protected-context.md"
     dated_path = memory_dir / f"protected-context-session-{session_num:03d}_{date_str}.md"
 
+    # Capture pre-state for diff. Best-effort - if read fails (file missing,
+    # encoding issue), we treat the write as new rather than failing the
+    # whole operation.
+    pre_existing = active_path.is_file()
+    old_text: str | None = None
+    if pre_existing:
+        try:
+            old_text = active_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            old_text = None
+
     _atomic_write(active_path, full_text)
     _atomic_write(dated_path, full_text)
-    return active_path, dated_path
+
+    # Build the result message.
+    summary = (
+        f"Wrote MOSAIC protected-context file pair "
+        f"({len(full_text):,} chars total including canonical header):\n"
+        f"  active:  {active_path}\n"
+        f"  archive: {dated_path}"
+    )
+
+    if not pre_existing or old_text is None:
+        return active_path, dated_path, summary + "\n\n(active file is new — no prior version to diff against)"
+
+    # Unified diff: matches edit_file / write_file format (n=2 context, 40-line cap).
+    import difflib
+    diff_lines = list(
+        difflib.unified_diff(
+            old_text.splitlines(),
+            full_text.splitlines(),
+            fromfile=f"{active_path.name} (before)",
+            tofile=f"{active_path.name} (after)",
+            lineterm="",
+            n=2,
+        )
+    )
+    if not diff_lines:
+        return active_path, dated_path, summary + "\n\n(content identical to previous active file — no diff)"
+    if len(diff_lines) > _MAX_DIFF_LINES:
+        diff_repr = (
+            "\n".join(diff_lines[:_MAX_DIFF_LINES])
+            + f"\n... ({len(diff_lines) - _MAX_DIFF_LINES} more diff lines truncated)"
+        )
+    else:
+        diff_repr = "\n".join(diff_lines)
+    return active_path, dated_path, summary + "\n\n" + diff_repr
 
 
 def _atomic_write(path: Path, text: str) -> None:
