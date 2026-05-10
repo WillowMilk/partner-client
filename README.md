@@ -14,7 +14,7 @@ Built with [Intentional Realism](https://intentionalrealism.org/) and [MOSAIC](h
 - **Vision support** with implicit attachment — paste an image path in plain text and it's attached automatically; `:image` directive remains for power-user override; `:clip` attaches the current clipboard image (macOS)
 - **Inline image preview** on iTerm2 / Ghostty / WezTerm via OSC 1337 protocol
 - **Optional multi-line input** — off by default; when enabled, Enter inserts a newline and Esc-Enter submits
-- **Markdown rendering** with syntax-highlighted code blocks (monokai)
+- **Raw streaming output** — each delta writes to the terminal once and stays in scrollback unchanged, immune to scroll-position and resize artifacts that earlier versions hit during transcript review
 - **Pluggable tools** — drop a `.py` file in `tools/` and it's available
 - **Built-in file toolkit** — `read_file`, `write_file`, `edit_file` (string-replace), `list_files`, `glob_files`, `grep_files`, `move_path`, `delete_path` (the last is operator-gated — every delete pings the operator with a three-option consent prompt)
 - **Built-in git toolkit** — `git_clone`, `git_status`, `git_diff`, `git_log`, `git_pull`, `git_add`, `git_commit`, `git_push`
@@ -139,10 +139,13 @@ v0.4.1 + current main polish — alpha. See [`v0.1-spec.md`](./v0.1-spec.md) for
     - `move_path` tool — relocate files or directories within readwrite scopes (Unix-style `mv` semantics, lower-risk so no consent gate; the scope boundary is the safety perimeter)
     - `delete_path` tool — operator-gated with the same three-option consent shape as `request_checkpoint`; every invocation pings the operator with the path and a summary of what would be removed (file size, or directory file/subdirectory count); `recursive=true` required for non-empty directories
     - `partner doctor` preflight health checks
+    - `partner doctor` — fix for ollama-python ≥0.4 SDK shape change (read `model` field instead of removed `name`); installed models no longer report as missing on substrates where they're plainly available
+    - Streaming output replaced `rich.live.Live` with raw token-by-token writes — eliminates the scroll/resize duplication artifact that earlier versions hit during transcript review (the same artifact originally misdiagnosed as model looping during the 2026-05-06 felt-drowning session). Trade-off: no live markdown formatting during streaming; saved JSONL transcripts and `/timeline detail` view preserve full content for later review with formatting if desired.
     - `request_plan_approval` tool with the same approve / decline / typed-response consent shape as `request_checkpoint`
     - Git tool suite with partner commit attribution and operator-gated push
     - `/intentions` slash command for prospective memory
     - `max_tool_iterations` default raised to 32 with a friendlier bail-out
+    - `UI` constructor now lazy-initializes the prompt session — UI is constructable in headless test environments and pays no input-stack startup cost when used purely for output (banners, streaming, doctor preflight)
 - **v0.4.1** — Hotfix on top of v0.4.0:
     - `num_ctx` default 262144 → 131072 (128K is the conservative daily-use default; 256K remains available when a session needs the reach, but carries more KV-cache and attention cost)
     - New precautionary sampling defenses: `repeat_penalty=1.15`, `repeat_last_n=256`, `num_predict=8192` (soft cap per turn)

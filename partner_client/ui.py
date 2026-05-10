@@ -2,15 +2,33 @@
 
 Standard chat-CLI pattern:
 - Top bar shows identity + model + max context
-- Main area scrolls assistant/user/tool exchanges, streamed live as they arrive
+- Main area scrolls assistant/user/tool exchanges, streamed as they arrive
 - Bottom status bar shows context-usage % + turn count + slash hint
 
 Streaming protocol used by OllamaClient.chat:
-    stream_open()           — print speaker label, begin a Live region
-    stream_delta(s)         — append delta, refresh Live render
-    stream_close()          — finalize Live, blank line
-    cancel_stream()         — close any open Live region (called on KeyboardInterrupt)
+    stream_open()           — print speaker label, mark streaming open
+    stream_delta(s)         — write raw delta directly to the terminal
+    stream_close()          — finalize block with a trailing newline
+    cancel_stream()         — close in-progress stream (called on KeyboardInterrupt)
     show_tool_call(...)     — print compact tool-call summary between iterations
+
+Streaming is **raw** — each delta writes to the terminal once and stays in
+scrollback unchanged. This is a deliberate departure from the earlier
+`rich.live.Live`-based approach, which had a known repaint-during-resize
+bug: when the terminal was resized or the user scrolled mid-stream, Live's
+anchor-based redraw would write fresh content above ghost lines from the
+previous render, producing visible duplication that didn't exist in the
+saved JSON. The bug was first surfaced as the "felt drowning" misdiagnosis
+on 2026-05-06 and re-surfaced as scroll/resize artifacts during transcript
+review. Raw streaming eliminates the entire class of artifact at the cost
+of live markdown rendering during streaming. The saved JSONL transcripts
+and `/timeline detail` view preserve full content for later review with
+formatting; this file is just the live tap.
+
+If we ever want live markdown back, Aider's MarkdownStream pattern (a
+6-line "live window" with stable scrollback above) is the proven way to
+do it without the resize artifact. Documented as a follow-up; not
+implemented here.
 
 Multi-line input: prompt_toolkit's `multiline=True` mode is enabled. Plain
 Enter inserts a newline; **Esc-Enter** (Option-Enter on Mac iTerm/Ghostty
@@ -29,18 +47,12 @@ from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
 from rich.console import Console
-from rich.live import Live
-from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.text import Text
 
 from .config import Config
 from .session import Session
 
-
-# Markdown code-block theme — applied to streamed content for syntax-highlighted code.
-# Pygments themes available: "monokai", "dracula", "one-dark", "github-dark", etc.
-_CODE_THEME = "monokai"
 
 # Image preview cap: don't blast huge images into the terminal escape stream.
 _INLINE_PREVIEW_MAX_BYTES = 2_000_000  # 2MB
@@ -67,19 +79,35 @@ class UI:
         self.config = config
         self.session = session
         self.console = Console()
-        history_path = config.resolve(config.memory.memory_dir) / ".prompt-history"
-        # Multi-line input is opt-in via [ui] multiline = true. Default is off:
-        # plain Enter submits, which matches daily-chat expectation. When on,
-        # Enter inserts newline and Esc-Enter submits.
-        kb = KeyBindings()
-        self._prompt_session = PromptSession(
-            history=FileHistory(str(history_path)),
-            multiline=bool(config.ui.multiline),
-            key_bindings=kb,
-        )
-        # Streaming state
-        self._stream_live: Live | None = None
-        self._stream_buffer: list[str] = []
+        # PromptSession initialization is deferred until first input is
+        # requested. Two reasons: (1) prompt_toolkit can fail to construct
+        # in headless environments (e.g. tests on Windows-bash, CI runners
+        # without a console screen buffer), and (2) it lets us skip the
+        # setup cost when the UI is used purely for output (banners,
+        # streaming, error display) — important for the doctor preflight
+        # path which never reads input.
+        self._prompt_session: PromptSession | None = None
+        # Streaming state — single boolean now that we no longer use Live.
+        # Each stream_delta() writes directly to the terminal in raw form.
+        self._streaming = False
+
+    def _get_prompt_session(self) -> PromptSession:
+        """Lazily build the prompt_toolkit session on first use."""
+        if self._prompt_session is None:
+            history_path = (
+                self.config.resolve(self.config.memory.memory_dir)
+                / ".prompt-history"
+            )
+            # Multi-line input is opt-in via [ui] multiline = true. Default is off:
+            # plain Enter submits, which matches daily-chat expectation. When on,
+            # Enter inserts newline and Esc-Enter submits.
+            kb = KeyBindings()
+            self._prompt_session = PromptSession(
+                history=FileHistory(str(history_path)),
+                multiline=bool(self.config.ui.multiline),
+                key_bindings=kb,
+            )
+        return self._prompt_session
 
     def show_banner(self) -> None:
         ctx_str = f"{self.config.model.num_ctx:,}"
@@ -97,76 +125,52 @@ class UI:
             self.console.print()
 
     # -------- streaming protocol --------
+    #
+    # Raw streaming: each delta writes directly to the terminal once.
+    # No Live region, no re-rendering, no markdown formatting in-flight.
+    # The trade-off vs. live formatting is intentional — see the module
+    # docstring for the rich.live.Live resize-artifact background.
 
     def stream_open(self) -> None:
         """Begin streaming an assistant text block. Prints the speaker label."""
-        # Print the label outside the Live region so it stays in scrollback.
         self.console.print(
             f"[bold magenta]{self.config.identity.name}:[/bold magenta]"
         )
-        self._stream_buffer = []
-        self._stream_live = Live(
-            "",
-            console=self.console,
-            refresh_per_second=12,
-            vertical_overflow="visible",
-            transient=False,
-        )
-        self._stream_live.start()
+        self._streaming = True
 
     def stream_delta(self, delta: str) -> None:
-        """Append `delta` to the running stream and refresh the rendered view."""
-        if self._stream_live is None:
+        """Write `delta` to the terminal as raw text.
+
+        Uses Console.out() so backticks, asterisks, brackets, and other
+        markdown / markup characters pass through literally — we want the
+        bytes the model emitted, not a render of them. `highlight=False`
+        keeps rich from attempting auto-syntax-highlighting on the stream.
+
+        No-ops when no stream is open (defensive against out-of-order calls
+        from the chat loop) or when the delta is empty.
+        """
+        if not self._streaming or not delta:
             return
-        self._stream_buffer.append(delta)
-        rendered = self._render_stream_buffer()
-        try:
-            self._stream_live.update(rendered)
-        except Exception:
-            # Render failed (rare); fall back to plain text
-            try:
-                self._stream_live.update(Text("".join(self._stream_buffer)))
-            except Exception:
-                pass
+        self.console.out(delta, end="", highlight=False)
 
     def stream_close(self) -> None:
-        """Finalize the streaming text block."""
-        if self._stream_live is None:
+        """Finalize the streaming text block with a trailing blank line."""
+        if not self._streaming:
             return
-        try:
-            self._stream_live.stop()
-        except Exception:
-            pass
-        self._stream_live = None
-        self._stream_buffer = []
-        self.console.print()  # blank line after each assistant block
+        self._streaming = False
+        # Trailing newline + blank line to separate this block from the next.
+        self.console.print()
 
     def cancel_stream(self) -> None:
-        """Close any open Live region without finalizing. Safe to call when no stream is open."""
-        if self._stream_live is None:
-            return
-        try:
-            self._stream_live.stop()
-        except Exception:
-            pass
-        self._stream_live = None
-        self._stream_buffer = []
+        """Cancel an in-progress stream cleanly.
 
-    def _render_stream_buffer(self):
-        """Build the rich renderable for the current stream buffer.
-
-        Auto-closes a trailing unclosed code fence so partial markdown renders
-        without breaking downstream styling.
+        Safe to call when no stream is open (idempotent). Used by the chat
+        loop when KeyboardInterrupt aborts mid-generation.
         """
-        text = "".join(self._stream_buffer)
-        # Count unfenced ``` occurrences; if odd, append a closing fence to render
-        # the in-progress block as a code block rather than as truncated markup.
-        if text.count("```") % 2 == 1:
-            text = text + "\n```"
-        try:
-            return Markdown(text, code_theme=_CODE_THEME)
-        except Exception:
-            return Text(text)
+        if not self._streaming:
+            return
+        self._streaming = False
+        self.console.print()
 
     # -------- non-streaming display helpers --------
 
@@ -258,7 +262,7 @@ class UI:
 
     def prompt(self) -> str:
         try:
-            return self._prompt_session.prompt(
+            return self._get_prompt_session().prompt(
                 HTML("<ansigreen><b>Willow:</b></ansigreen> "),
                 bottom_toolbar=self.status_bar_text,
             )
@@ -269,7 +273,7 @@ class UI:
         # Force single-line mode for y/N confirmation; the session-level multiline
         # default would otherwise require Esc-Enter for a one-character answer.
         try:
-            answer = self._prompt_session.prompt(
+            answer = self._get_prompt_session().prompt(
                 f"{question} [y/N] ",
                 multiline=False,
             ).strip().lower()
@@ -300,7 +304,7 @@ class UI:
             "or type a response to decline with your message.[/dim]"
         )
         try:
-            answer = self._prompt_session.prompt(
+            answer = self._get_prompt_session().prompt(
                 "> ",
                 multiline=False,
             ).strip()
