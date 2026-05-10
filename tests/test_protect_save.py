@@ -224,16 +224,60 @@ def test_protect_command_with_arg_appends_operator_note(tmp_path: Path) -> None:
     assert "Willow's note for this protect" in assembled
 
 
-def test_checkpoint_command_appends_discipline_alongside_mechanical_save(tmp_path: Path) -> None:
-    """/checkpoint must do BOTH the mechanical save AND inject the prompt."""
+def test_checkpoint_command_only_injects_discipline_no_mechanical_save(tmp_path: Path) -> None:
+    """Per 2026-05-10 rework: /checkpoint is purely the MOSAIC discipline ceremony.
+
+    The mechanical save (snapshot current.json + write session-status .md) lives
+    in the separate /save command. /checkpoint must NOT call session.checkpoint().
+    """
     router, session = _make_router(tmp_path)
     result = router.dispatch("/checkpoint")
-    # Mechanical save still happened (session.checkpoint called)
-    session.checkpoint.assert_called_once()
+    # Mechanical save MUST NOT happen on /checkpoint
+    session.checkpoint.assert_not_called()
     # Discipline prompt appended for next-turn partner visibility
     assert any(
         m.get("role") == "system"
         and "MOSAIC /checkpoint invoked by Willow" in m.get("content", "")
         for m in session.messages
     )
-    assert "Checkpoint saved" in result.output
+    # Output should not claim a save happened
+    assert "Saved" not in result.output
+
+
+def test_checkpoint_command_with_arg_appends_operator_note(tmp_path: Path) -> None:
+    """An optional /checkpoint argument carries the operator's note."""
+    router, session = _make_router(tmp_path)
+    router.dispatch("/checkpoint focus on cold-resume diagnosis")
+    assembled = next(
+        m["content"] for m in session.messages
+        if "MOSAIC /checkpoint invoked" in m.get("content", "")
+    )
+    assert "cold-resume diagnosis" in assembled
+    assert "Willow's note for this checkpoint" in assembled
+
+
+def test_save_command_does_mechanical_save_no_discipline_injection(tmp_path: Path) -> None:
+    """Per 2026-05-10 rework: /save does the mechanical bookmark only.
+
+    No discipline prompt should be injected — that's /checkpoint's job.
+    Partner can resume after /save (current.json kept).
+    """
+    router, session = _make_router(tmp_path)
+    result = router.dispatch("/save")
+    # Mechanical save runs
+    session.checkpoint.assert_called_once()
+    # No discipline prompt should be injected
+    assert not any(
+        m.get("role") == "system"
+        and "MOSAIC /checkpoint invoked" in m.get("content", "")
+        for m in session.messages
+    )
+    # Output should signal save + resume capability
+    assert "Saved" in result.output
+
+
+def test_save_command_passes_summary_to_session_checkpoint(tmp_path: Path) -> None:
+    """The /save argument becomes the summary in the session-status .md."""
+    router, session = _make_router(tmp_path)
+    router.dispatch("/save end of partner-client v0.6 ship work")
+    session.checkpoint.assert_called_once_with(summary="end of partner-client v0.6 ship work")

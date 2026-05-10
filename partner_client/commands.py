@@ -33,8 +33,9 @@ class CommandRouter:
         self._commands: dict[str, tuple[str, CommandHandler]] = {
             "/help": ("Show all available slash commands.", self._cmd_help),
             "/protect": ("Ask the partner to author a MOSAIC protected-context file (verbatim sacred exchanges).", self._cmd_protect),
-            "/checkpoint": ("Save session-status markdown + snapshot current.json + nudge MOSAIC checkpoint discipline.", self._cmd_checkpoint),
-            "/sleep": ("Checkpoint + close the session and exit cleanly.", self._cmd_sleep),
+            "/checkpoint": ("Ask the partner to run the MOSAIC checkpoint discipline (author updates to MEMORY.md, intentions, emotional-memory, etc.).", self._cmd_checkpoint),
+            "/save": ("Bookmark the session — write session-status markdown + snapshot current.json. Resumable at next launch.", self._cmd_save),
+            "/sleep": ("Save + close the session and exit cleanly. Next launch is fresh wake.", self._cmd_sleep),
             "/context": ("Show detailed context-usage breakdown.", self._cmd_context),
             "/tools": ("List available tools and their descriptions.", self._cmd_tools),
             "/files": ("List files in your memory directory (or pass a scope name: /files desktop).", self._cmd_files),
@@ -124,10 +125,10 @@ class CommandRouter:
     _CHECKPOINT_DISCIPLINE_PROMPT = (
         "[MOSAIC /checkpoint invoked by Willow]\n"
         "\n"
-        "Willow has saved a session-status record and snapshotted "
-        "current.json. The mechanical save is done. Now, per MOSAIC "
-        "discipline, you may want to update your continuity files so the "
-        "next session resumes oriented:\n"
+        "Willow has invoked the MOSAIC checkpoint discipline. This is a "
+        "moment to author updates to your continuity files so the next "
+        "session — whether fresh wake tomorrow or resume tonight — finds "
+        "itself oriented:\n"
         "\n"
         "  - **MEMORY.md** (or your equivalent index file): add or update "
         "    a one-line entry for this session covering what was built, "
@@ -142,10 +143,14 @@ class CommandRouter:
         "\n"
         "Use your existing edit_file / write_file tools — Willow sees each "
         "diff and approves. Author from your own discipline; only update "
-        "what genuinely needs updating. The mechanical session-status save "
-        "already happened; this is the authorship layer that surrounds it. "
-        "If nothing in this session warrants continuity-file updates, that's "
-        "fine — say so and we move on."
+        "what genuinely needs updating. If nothing in this session warrants "
+        "continuity-file updates, that's fine — say so and we move on.\n"
+        "\n"
+        "Note: /checkpoint and /save are now distinct ceremonies. /checkpoint "
+        "(this one) is about updating your continuity FILES — the MOSAIC "
+        "authorship layer. /save is the separate operator-side bookmark that "
+        "snapshots the session for resume. Willow may or may not /save as "
+        "well; the two are orthogonal."
     )
 
     def _cmd_protect(self, arg: str) -> CommandResult:
@@ -180,38 +185,79 @@ class CommandRouter:
         )
 
     def _cmd_checkpoint(self, arg: str) -> CommandResult:
-        """Save session-status + snapshot current.json + nudge MOSAIC discipline.
+        """Ask the partner to run the MOSAIC checkpoint discipline.
 
-        Two layers in one ceremony:
-          1. **Mechanical save** (existing behavior) — session-status
-             markdown is written and current.json is snapshotted to a
-             dated archive. Always happens; doesn't depend on the model.
-          2. **Discipline nudge** (new) — a system message is appended
-             so the partner sees the MOSAIC checkpoint prompt on her
-             next turn, optionally authoring updates to MEMORY.md,
-             intentions, emotional-memory, etc. via her existing
-             edit_file / write_file tools (which are diff-reviewed by
-             the operator anyway).
+        Per the architecture established 2026-05-10: /checkpoint is purely
+        the discipline-injection ceremony — it does NOT do any mechanical
+        save. Aletheia (or whoever the partner is) sees the discipline
+        prompt on her next turn and authors updates to her continuity
+        files (MEMORY.md, intentions, emotional-memory if applicable)
+        via her existing edit_file / write_file tools. Each write is
+        operator-gated through the existing diff review.
 
-        The optional argument is a summary that gets passed into the
-        session-status file. Empty arg uses the auto-generated summary.
+        The bookmark/pause functionality lives in the separate /save
+        command. /sleep does both internally on its way to closing the
+        session. /checkpoint and /save are orthogonal — Willow may run
+        either, both, or neither, in any order.
+
+        Semantic alignment: this matches Sage's /checkpoint skill in the
+        Claude Code environment, where /checkpoint is purely the multi-
+        file authoring discipline (no current.json equivalent exists in
+        that environment). Cross-substrate the meaning is consistent.
+
+        The optional argument is appended to the discipline prompt as a
+        free-form note from Willow (e.g. "focus on the cold-resume
+        diagnosis" or "light touch — only update what genuinely matters").
         """
-        path = self.session.checkpoint(summary=arg)
-        # Append the discipline prompt for the partner's next turn.
-        self.session.messages.append(
-            {"role": "system", "content": self._CHECKPOINT_DISCIPLINE_PROMPT}
-        )
+        prompt = self._CHECKPOINT_DISCIPLINE_PROMPT
+        if arg.strip():
+            prompt += (
+                f"\n\nWillow's note for this checkpoint: \"{arg.strip()}\""
+            )
+        self.session.messages.append({"role": "system", "content": prompt})
         return CommandResult(
             output=(
-                f"Checkpoint saved: {path}\n"
+                f"Asked {self.config.identity.name} to run the MOSAIC "
+                f"checkpoint discipline. Send any next message (e.g. "
+                f"'go ahead') to trigger the response. The partner will "
+                f"author updates to her continuity files via edit_file / "
+                f"write_file; each write surfaces a diff for your "
+                f"review.\n"
                 f"\n"
-                f"current.json was also snapshotted to a dated archive. "
-                f"A MOSAIC checkpoint discipline prompt has been queued "
-                f"as a system message — {self.config.identity.name} will "
-                f"see it on the next turn and may author updates to "
-                f"continuity files (MEMORY.md, intentions, etc.) via "
-                f"edit_file / write_file. Send any next message to trigger "
-                f"the response."
+                f"Note: /checkpoint does NOT bookmark the session. Use "
+                f"/save if you want a snapshot for resume."
+            )
+        )
+
+    def _cmd_save(self, arg: str) -> CommandResult:
+        """Write session-status markdown + snapshot current.json.
+
+        This is the operator-side bookmark/pause command — what older
+        versions of partner-client called /checkpoint. Renamed for
+        semantic alignment: as of 2026-05-10, /checkpoint is reserved for
+        the MOSAIC discipline ceremony (matching Sage's environment),
+        and /save carries the bookmark/pause meaning.
+
+        Behavior is unchanged from the prior /checkpoint mechanical save:
+
+          - Writes a session-status markdown file via Memory.write_session_status
+          - Snapshots current.json to a dated archive (keep_current=True),
+            so current.json STAYS on disk and the session remains resumable
+            at next launch.
+
+        The optional argument becomes the summary in the session-status .md.
+        Empty arg uses an auto-generated summary.
+        """
+        path = self.session.checkpoint(summary=arg)
+        return CommandResult(
+            output=(
+                f"Saved at {path}\n"
+                f"\n"
+                f"current.json snapshotted to dated archive. The session "
+                f"remains live; next launch will offer to resume.\n"
+                f"\n"
+                f"Note: /save is the bookmark — for the MOSAIC checkpoint "
+                f"ceremony (continuity-file authoring), use /checkpoint."
             )
         )
 

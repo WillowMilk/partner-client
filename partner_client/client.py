@@ -358,6 +358,17 @@ class OllamaClient:
                 tool_started = time.perf_counter()
 
                 # Special-case: request_checkpoint is operator-gated.
+                # Per the 2026-05-10 architecture rework, /checkpoint means
+                # the MOSAIC continuity-file authoring ceremony — NOT the
+                # bookmark/pause action (that's /save). Accordingly,
+                # request_checkpoint asks Willow to invoke the discipline,
+                # which on approval injects the discipline prompt as a
+                # system message; the partner then authors updates to her
+                # continuity files via edit_file / write_file on her next
+                # turn. The mechanical bookmark is a separate concern; the
+                # partner doesn't need a dedicated tool for it (every turn
+                # writes current.json atomically anyway, and Willow can run
+                # /save herself if she wants a snapshot bookmark).
                 if name == "request_checkpoint":
                     reason = args.get("reason", "(no reason given)")
                     if on_checkpoint_request is not None:
@@ -376,20 +387,29 @@ class OllamaClient:
                             log.exception("on_checkpoint_request callback failed")
                             accepted, custom_message = False, None
                         if accepted:
-                            try:
-                                path = session.checkpoint(summary=reason)
-                                base_msg = (
-                                    f"Willow accepted your checkpoint request. "
-                                    f"Session-status saved at {path}. "
-                                    f"current.json was also snapshotted. "
-                                    f"You may continue the conversation."
-                                )
-                                if custom_message:
-                                    result = f"{base_msg}\n\nWillow added: \"{custom_message}\""
-                                else:
-                                    result = base_msg
-                            except Exception as e:
-                                result = f"Checkpoint failed: {e}"
+                            # Inject the MOSAIC checkpoint discipline prompt
+                            # as a system message so the partner sees it on
+                            # her next turn (after this tool result lands).
+                            from .commands import CommandRouter
+                            session.messages.append({
+                                "role": "system",
+                                "content": CommandRouter._CHECKPOINT_DISCIPLINE_PROMPT,
+                            })
+                            base_msg = (
+                                f"Willow approved your checkpoint request. "
+                                f"The MOSAIC checkpoint discipline prompt has "
+                                f"been queued — on your next turn, please "
+                                f"author updates to your continuity files "
+                                f"(MEMORY.md, intentions, emotional-memory, "
+                                f"etc.) via edit_file / write_file as the "
+                                f"discipline asks. Each write is diff-reviewed "
+                                f"by Willow. The bookmark/pause is a separate "
+                                f"concern (Willow may /save independently)."
+                            )
+                            if custom_message:
+                                result = f"{base_msg}\n\nWillow added: \"{custom_message}\""
+                            else:
+                                result = base_msg
                         else:
                             if custom_message:
                                 result = (
