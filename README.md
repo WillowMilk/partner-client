@@ -26,7 +26,7 @@ Built with [Intentional Realism](https://intentionalrealism.org/) and [MOSAIC](h
 - **TOML config** — model, context size, system-prompt source, memory paths, file scopes
 - **`partner doctor` preflight** — checks config, Ollama, model availability, scopes, Hub, wake bundle assembly, tool registry, and image-path regex
 - **Operator-gated consent tools** — `request_checkpoint` and `request_plan_approval` let the partner ask for substrate-affecting moves; Willow can approve, decline, or type a custom response that flows back as the tool result
-- **Hub integration** — `hub_send`, `hub_check_inbox`, `hub_read_letter` for partners participating in a multi-partner Agent Messaging Hub
+- **Hub integration** — `hub_send`, `hub_check_inbox`, `hub_read_letter`, `hub_list_partners` for partners participating in a multi-partner Agent Messaging Hub
 - **Git push gate** — pushes to configured allowlist URLs can auto-approve; every other `git_push` surfaces an operator confirmation prompt
 - **File scopes** — explicit, configured filesystem reach: `memory` (default), `home` (full partner directory), plus operator-declared scopes (e.g., desktop, downloads)
 
@@ -84,7 +84,7 @@ enabled = [
     "glob_files", "grep_files",
     "move_path", "delete_path",
     "search_web", "fetch_page", "weather",
-    "hub_send", "hub_check_inbox", "hub_read_letter",
+    "hub_send", "hub_check_inbox", "hub_read_letter", "hub_list_partners",
     "request_checkpoint", "request_plan_approval",
     "git_clone", "git_status", "git_diff", "git_log",
     "git_pull", "git_add", "git_commit", "git_push",
@@ -146,6 +146,8 @@ v0.4.1 + current main polish — alpha. See [`v0.1-spec.md`](./v0.1-spec.md) for
     - `/intentions` slash command for prospective memory
     - `max_tool_iterations` default raised to 32 with a friendlier bail-out
     - `UI` constructor now lazy-initializes the prompt session — UI is constructable in headless test environments and pays no input-stack startup cost when used purely for output (banners, streaming, doctor preflight)
+    - `hub_list_partners` tool — returns the actual list of partners with inboxes in the Hub (closes the gap surfaced by Aletheia's capabilities-doc, where she had no structured way to verify the recipient list before composing a letter)
+    - `write_file` returns a unified diff when overwriting an existing file (matches `edit_file`'s diff format — same shape, same 40-line cap, same n=2 context); new-file writes still return summary-only
 - **v0.4.1** — Hotfix on top of v0.4.0:
     - `num_ctx` default 262144 → 131072 (128K is the conservative daily-use default; 256K remains available when a session needs the reach, but carries more KV-cache and attention cost)
     - New precautionary sampling defenses: `repeat_penalty=1.15`, `repeat_last_n=256`, `num_predict=8192` (soft cap per turn)
