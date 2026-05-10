@@ -144,21 +144,52 @@ def _run(config: Config) -> int:
     session = Session(config=config, memory=memory)
     wake_bundle = memory.assemble_wake_bundle()
 
-    # Decide resume vs fresh
-    wake_status = session.wake(wake_bundle, resume_existing=None)
+    # Decide resume vs truncate vs fresh. The 3-way prompt is shown only if
+    # an existing non-closed current.json is found (otherwise wake() goes
+    # straight to fresh). When `resume_keep_pairs` is 0, [t] is omitted.
+    wake_status = session.wake(wake_bundle, resume_mode=None)
     if wake_status == "needs-decision":
-        # Prompt the user
-        # Use a tiny ephemeral console here since UI isn't built yet
         import builtins
+        # Estimate size to show the operator when truncation actually matters
         try:
-            answer = builtins.input(
-                f"Found unfinished session at {session.current_path}. "
-                "Resume? [y/N] "
-            ).strip().lower()
+            size_bytes = session.current_path.stat().st_size
+            size_kb = size_bytes / 1024
+            size_label = f"{size_kb:,.0f} KB" if size_kb >= 1 else f"{size_bytes} bytes"
+        except OSError:
+            size_label = "unknown size"
+
+        keep_pairs = config.wake_bundle.resume_keep_pairs
+        truncation_available = keep_pairs > 0
+
+        if truncation_available:
+            prompt_text = (
+                f"Found unfinished session at {session.current_path} ({size_label}).\n"
+                f"  [y] Resume full       - complete granular recall (slow on heavy sessions)\n"
+                f"  [t] Resume truncated  - keep last {keep_pairs} pairs + refreshed system msgs; full snapshot archived\n"
+                f"  [n] Fresh wake        - archive existing, start a new session\n"
+                f"Choice [y/t/n]: "
+            )
+            valid_choices = {"y", "yes", "t", "trunc", "truncate", "truncated", "n", "no"}
+        else:
+            prompt_text = (
+                f"Found unfinished session at {session.current_path} ({size_label}). "
+                f"Resume? [y/N] "
+            )
+            valid_choices = {"y", "yes", "n", "no"}
+
+        try:
+            answer = builtins.input(prompt_text).strip().lower()
         except (EOFError, KeyboardInterrupt):
             answer = "n"
-        resume = answer in ("y", "yes")
-        wake_status = session.wake(wake_bundle, resume_existing=resume)
+
+        if answer in ("y", "yes"):
+            resume_mode = "full"
+        elif truncation_available and answer in ("t", "trunc", "truncate", "truncated"):
+            resume_mode = "truncated"
+        else:
+            resume_mode = "fresh"
+
+        wake_status = session.wake(wake_bundle, resume_mode=resume_mode)
 
     ui = UI(config, session)
     timeline = RunTimeline(config, session)

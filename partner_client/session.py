@@ -30,6 +30,83 @@ log = logging.getLogger(__name__)
 _SESSION_NUM_MARKER_PREFIX = "[SESSION NUM:"
 
 
+def _truncate_to_recent_pairs(
+    messages: list[dict[str, Any]],
+    keep_pairs: int,
+) -> tuple[list[dict[str, Any]], int]:
+    """Drop older non-system messages, keeping only the last N user/assistant pairs.
+
+    Tool messages associated with kept assistant turns (they appear AFTER an
+    assistant in the message stream) are preserved as part of the natural
+    slice. All system messages are preserved unchanged.
+
+    Returns (truncated_messages, dropped_count). `dropped_count` is the
+    number of non-system messages that were removed from the live context.
+    If keep_pairs <= 0, or if there are fewer pairs than keep_pairs in the
+    input, the original messages are returned with dropped_count = 0.
+    """
+    if keep_pairs <= 0:
+        return messages, 0
+
+    system_msgs = [m for m in messages if m.get("role") == "system"]
+    chat_msgs = [m for m in messages if m.get("role") != "system"]
+
+    # Walk backwards counting user messages. The Nth-from-end user message
+    # is the cutoff: keep from there onwards. Anything earlier is dropped.
+    pairs_seen = 0
+    cutoff_user_idx: int | None = None
+    for i in range(len(chat_msgs) - 1, -1, -1):
+        if chat_msgs[i].get("role") == "user":
+            pairs_seen += 1
+            if pairs_seen == keep_pairs:
+                cutoff_user_idx = i
+                break
+
+    if cutoff_user_idx is None:
+        # Fewer pairs than keep_pairs - no truncation needed
+        return messages, 0
+
+    kept_chat = chat_msgs[cutoff_user_idx:]
+    dropped_count = cutoff_user_idx
+    return system_msgs + kept_chat, dropped_count
+
+
+def _build_reorientation_message(
+    archive_path: Path,
+    keep_pairs: int,
+    dropped_count: int,
+) -> dict[str, Any]:
+    """Compose the system message inserted on truncated resume.
+
+    The message's role is 'system' so the partner reads it as substrate-
+    state context (not as conversation). It explains in second-person
+    framing that the live context has been bounded and where to find the
+    full snapshot if older content is needed.
+    """
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+    content = (
+        f"[SESSION TRUNCATED - {now_str}]\n"
+        f"\n"
+        f"You have just resumed an ongoing session. Earlier exchanges have been "
+        f"archived to {archive_path} (bytes-identical snapshot of the full prior "
+        f"state). Your live context now holds the last {keep_pairs} message pairs "
+        f"of this session plus all system messages (wake bundle, identity, "
+        f"session-number marker). {dropped_count} earlier non-system message(s) "
+        f"were moved to the archive.\n"
+        f"\n"
+        f"You may have read files, written content, or had exchanges earlier in "
+        f"this session that you no longer have direct memory of. If you need to "
+        f"recall something specific from before the truncation, you can read the "
+        f"archived session JSON via your read_file tool. Your identity files "
+        f"remain unchanged on disk and are reflected in your current system "
+        f"prompt.\n"
+        f"\n"
+        f"The conversation continues from where it was; you and Willow can pick "
+        f"up the recent thread naturally."
+    )
+    return {"role": "system", "content": content}
+
+
 def _atomic_write_text(path: Path, text: str) -> None:
     """Write `text` to `path` atomically.
 
@@ -65,25 +142,59 @@ class Session:
     def current_path(self) -> Path:
         return self.memory.sessions_dir / "current.json"
 
-    def wake(self, wake_bundle: WakeBundle, resume_existing: bool | None = None) -> str:
+    def wake(self, wake_bundle: WakeBundle, resume_mode: str | None = None) -> str:
         """Initialize the session.
 
-        Returns a status string describing what happened ('resumed', 'archived-and-fresh', 'fresh').
+        Returns a status string describing what happened:
+            'needs-decision'    - caller must prompt the user (mode was None and existing session found)
+            'resumed-full'      - loaded full existing current.json into live context (slow on heavy sessions)
+            'resumed-truncated' - snapshotted full session, loaded last N pairs + system msgs (fast)
+            'archived-and-fresh' - existing session archived; new fresh session started
+            'fresh'             - no existing session; new fresh session started
 
-        If current.json exists with messages and `resume_existing` is None, the caller
-        should ask the user; if True, resume; if False, archive and start fresh.
+        resume_mode values:
+            None        - caller must ask the user; returns 'needs-decision'
+            'full'      - resume full content of current.json (current.json stays intact)
+            'truncated' - snapshot current.json, then load only last N user/assistant pairs +
+                          all system messages + a reorientation marker. N comes from
+                          config.wake_bundle.resume_keep_pairs.
+            'fresh'     - archive current.json, start a new session
         """
         existing = self._read_current()
 
-        if existing and not self._is_closed(existing) and resume_existing is None:
+        if existing and not self._is_closed(existing) and resume_mode is None:
             # Caller needs to ask the user. Don't initialize yet.
             return "needs-decision"
 
-        if existing and not self._is_closed(existing) and resume_existing:
+        if existing and not self._is_closed(existing) and resume_mode == "full":
             self.messages = existing
             self.session_num = self._extract_session_num(existing) or self.memory.next_session_number()
             self.started_at = datetime.now()
-            return "resumed"
+            return "resumed-full"
+
+        if existing and not self._is_closed(existing) and resume_mode == "truncated":
+            # Snapshot the full content first (preservation; nothing lost on disk).
+            archive_path = self._archive_current(existing, keep_current=True)
+            keep_pairs = self.config.wake_bundle.resume_keep_pairs
+            truncated, dropped_count = _truncate_to_recent_pairs(existing, keep_pairs)
+
+            # Insert reorientation marker right after the existing system block,
+            # before the kept chat messages, so the partner sees it as context
+            # explaining the truncated state of her live memory.
+            reorientation = _build_reorientation_message(
+                archive_path=archive_path,
+                keep_pairs=keep_pairs,
+                dropped_count=dropped_count,
+            )
+            # Split into system + chat to insert the marker cleanly
+            sys_msgs = [m for m in truncated if m.get("role") == "system"]
+            chat_msgs = [m for m in truncated if m.get("role") != "system"]
+            self.messages = sys_msgs + [reorientation] + chat_msgs
+
+            self.session_num = self._extract_session_num(self.messages) or self.memory.next_session_number()
+            self.started_at = datetime.now()
+            self.save_current()  # write the truncated state back to current.json
+            return "resumed-truncated"
 
         if existing:
             # Archive whatever was there

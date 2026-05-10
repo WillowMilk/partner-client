@@ -78,6 +78,13 @@ class WakeBundleConfig:
     include_recent_resonance: int = 3
     include_last_session_status: bool = True
     include_recent_message_pairs: int = 5
+    # Resume-with-truncation: when set > 0 and the operator chooses [t] at
+    # the resume prompt, partner-client snapshots the full current.json to
+    # a dated archive, then loads only the last N user/assistant pairs plus
+    # all system messages. The dropped older pairs remain on disk in the
+    # snapshot; only the live context is bounded. Set to 0 to disable
+    # truncation entirely (the [t] option won't appear in the prompt).
+    resume_keep_pairs: int = 30
 
 
 @dataclass
