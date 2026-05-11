@@ -202,3 +202,101 @@ def resolve_path(filename: str, write: bool = False) -> Path:
 def list_scopes() -> list[Scope]:
     """Return the configured scopes (for /tools, /context, wake-bundle display)."""
     return _load_scopes_from_env()
+
+
+def detect_cross_scope_collision(filename: str) -> str | None:
+    """Detect silent-default-routing ambiguity for bare-name tool arguments.
+
+    Background: when a tool is called with a bare name like 'aletheia', path
+    resolution routes to the default scope (typically 'memory'). If a
+    same-named entry also exists in another scope (e.g. 'workspace:aletheia'),
+    the tool returns success-shaped output but operates on the default-scope
+    target, not the one the operator probably meant. This is the bug class
+    that bit Aletheia 2026-05-09 (git_commit silently committed to
+    memory:aletheia while she had been editing workspace:aletheia).
+
+    This function detects that ambiguity proactively. It returns a short
+    warning string when a bare-name resolution has sibling collisions in
+    other scopes, and None when there's no ambiguity.
+
+    Returns None for:
+      - Scope-qualified inputs ('workspace:foo')   — explicit, unambiguous
+      - Absolute paths                              — route by prefix-matching
+      - Bare names with no sibling collisions       — only one scope has it
+      - Empty / invalid inputs                      — defensive fallthrough
+
+    Returns a warning string like:
+      "Note: bare name 'aletheia' resolved to memory:aletheia (default scope).
+       A sibling also exists at: workspace:aletheia. To target a specific
+       location, qualify with the scope name (e.g. 'workspace:aletheia')."
+
+    The warning never changes behavior — it just surfaces the ambiguity so
+    the partner can disambiguate explicitly. *Silent wrong-success becomes
+    visible right-success-or-loud-correction.*
+    """
+    if not filename or not filename.strip():
+        return None
+
+    # Scope-qualified: explicit, unambiguous by construction
+    if _SCOPE_QUALIFIED_RE.match(filename):
+        return None
+
+    p = Path(filename).expanduser()
+
+    # Absolute path: routes by prefix-matching exactly one scope (or none)
+    if p.is_absolute():
+        return None
+
+    scopes = _load_scopes_from_env()
+    if not scopes:
+        return None
+
+    # Find the default scope (where bare names route to)
+    default_name = _default_scope_name()
+    default_scope = next((s for s in scopes if s.name == default_name), None)
+    if default_scope is None:
+        default_scope = scopes[0]
+
+    # The "expected" target — where this bare name will actually go
+    default_target = default_scope.path.expanduser() / filename
+    try:
+        default_resolved = default_target.resolve(strict=False)
+    except (OSError, RuntimeError):
+        default_resolved = default_target
+
+    # Only worth warning about if the default target actually exists.
+    # (If neither exists, it's a write-to-new operation; if only a sibling
+    # exists, the resolution will fail at use-site anyway.)
+    if not default_target.exists():
+        return None
+
+    collisions: list[str] = []
+    for scope in scopes:
+        if scope.name == default_scope.name:
+            continue
+        sibling = scope.path.expanduser() / filename
+        if not sibling.exists():
+            continue
+        try:
+            sibling_resolved = sibling.resolve(strict=False)
+        except (OSError, RuntimeError):
+            sibling_resolved = sibling
+        # Skip if it's the same physical path as the default (e.g. nested
+        # scope where 'home' contains 'memory' — the file is reachable via
+        # both names but it's the same file).
+        if sibling_resolved == default_resolved:
+            continue
+        collisions.append(f"{scope.name}:{filename}")
+
+    if not collisions:
+        return None
+
+    sibling_list = ", ".join(collisions)
+    return (
+        f"⚠ Note: bare name '{filename}' resolved to "
+        f"{default_scope.name}:{filename} (default scope). "
+        f"A sibling also exists at: {sibling_list}. "
+        f"If you meant the other location, qualify with the scope name "
+        f"(e.g. '{collisions[0]}'). This warning surfaces ambiguity "
+        f"only — the resolved path itself is unchanged."
+    )

@@ -47,10 +47,10 @@ TOOL_DEFINITION = {
 
 
 def execute(repo: str, file: str = "", staged: bool = False) -> str:
-    from partner_client._git_helpers import resolve_repo, run_git, GitError
+    from partner_client._git_helpers import resolve_repo, run_git, with_scope_warning, GitError
 
     try:
-        repo_path = resolve_repo(repo)
+        repo_path, scope_warning = resolve_repo(repo)
     except GitError as e:
         return f"Error: {e}"
 
@@ -64,13 +64,14 @@ def execute(repo: str, file: str = "", staged: bool = False) -> str:
     if rc != 0:
         return f"git diff failed: {stderr.strip()}"
     if not stdout:
-        return "(no changes)"
+        return with_scope_warning("(no changes)", scope_warning)
 
     MAX_LINES = 100
     lines = stdout.split("\n")
     if len(lines) > MAX_LINES:
-        return (
+        return with_scope_warning(
             "\n".join(lines[:MAX_LINES])
-            + f"\n... ({len(lines) - MAX_LINES} more lines truncated)"
+            + f"\n... ({len(lines) - MAX_LINES} more lines truncated)",
+            scope_warning,
         )
-    return stdout
+    return with_scope_warning(stdout, scope_warning)

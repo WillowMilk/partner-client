@@ -536,7 +536,11 @@ class OllamaClient:
                             resolve_repo,
                             run_git,
                         )
-                        repo_path = resolve_repo(repo_arg, write=True)
+                        # Scope warning here is informational only — the git_push
+                        # tool will surface it on its own via with_scope_warning
+                        # when execute() runs after the consent gate. We discard
+                        # this copy to avoid double-printing.
+                        repo_path, _ = resolve_repo(repo_arg, write=True)
                         remote_url = get_remote_url(repo_path, remote_arg) or "(unknown URL)"
                     except (GitError, ImportError) as e:
                         result = f"git_push setup failed: {e}"

@@ -33,14 +33,14 @@ TOOL_DEFINITION = {
 
 
 def execute(repo: str, remote: str = "origin") -> str:
-    from partner_client._git_helpers import resolve_repo, run_git, GitError
+    from partner_client._git_helpers import resolve_repo, run_git, with_scope_warning, GitError
 
     try:
-        repo_path = resolve_repo(repo, write=True)
+        repo_path, scope_warning = resolve_repo(repo, write=True)
     except GitError as e:
         return f"Error: {e}"
 
     rc, stdout, stderr = run_git(repo_path, ["pull", remote])
     if rc != 0:
         return f"git pull failed: {stderr.strip() or stdout.strip()}"
-    return stdout.strip() or "(already up to date)"
+    return with_scope_warning(stdout.strip() or "(already up to date)", scope_warning)

@@ -13,7 +13,7 @@ import os
 import subprocess
 from pathlib import Path
 
-from .paths import resolve_path, PathError
+from .paths import detect_cross_scope_collision, resolve_path, PathError
 
 
 # Git operations can be slow over the network (clone, push, pull). 60s is
@@ -25,7 +25,7 @@ class GitError(Exception):
     """Raised when a git tool can't operate on the requested repo."""
 
 
-def resolve_repo(name: str, write: bool = False) -> Path:
+def resolve_repo(name: str, write: bool = False) -> tuple[Path, str | None]:
     """Resolve a repo name (or path) to an absolute path that is a git repo.
 
     Accepts:
@@ -33,8 +33,22 @@ def resolve_repo(name: str, write: bool = False) -> Path:
       - scope-qualified ("workspace:aletheia-sandbox")
       - absolute path that falls within an allowed scope
 
+    Returns (path, scope_warning):
+      path: absolute Path to the resolved git repo
+      scope_warning: a non-empty string when a bare name resolved to the
+        default scope but a same-named sibling exists in another scope
+        (silent-default-routing ambiguity detected). None when there's no
+        ambiguity. Callers should surface the warning in tool output so
+        the partner can re-issue with a scope qualifier if needed.
+
     Raises GitError if the path doesn't resolve to an existing git repo, or
     if write=True and the matching scope is read-only.
+
+    The warning is informational only — the resolved path is unchanged.
+    See `detect_cross_scope_collision` in paths.py for the underlying
+    detection logic; this was added 2026-05-11 as architectural defense
+    against the bug class that bit Aletheia 2026-05-09 (silent commits
+    to memory:aletheia while editing workspace:aletheia).
     """
     try:
         path = resolve_path(name, write=write)
@@ -44,7 +58,8 @@ def resolve_repo(name: str, write: bool = False) -> Path:
         raise GitError(f"Not a directory: {path}")
     if not (path / ".git").exists():
         raise GitError(f"Not a git repository (no .git directory): {path}")
-    return path
+    warning = detect_cross_scope_collision(name)
+    return path, warning
 
 
 def run_git(
@@ -81,6 +96,19 @@ def get_remote_url(repo_path: Path, remote: str = "origin") -> str | None:
     """Get the URL of a remote in this repo. None if the remote doesn't exist."""
     rc, stdout, _ = run_git(repo_path, ["config", "--get", f"remote.{remote}.url"])
     return stdout.strip() if rc == 0 else None
+
+
+def with_scope_warning(result: str, scope_warning: str | None) -> str:
+    """Prepend a cross-scope ambiguity warning to a tool result, if any.
+
+    Helper for git_* tools: when resolve_repo() returns a non-None warning,
+    surface it ahead of the actual tool output so the partner sees the
+    silent-default-routing notice as part of the same turn's tool result.
+    Returns the result unchanged when there's no warning.
+    """
+    if scope_warning:
+        return f"{scope_warning}\n\n{result}"
+    return result
 
 
 def derive_clone_target_name(url: str) -> str:

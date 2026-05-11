@@ -32,10 +32,10 @@ TOOL_DEFINITION = {
 
 
 def execute(repo: str, count: int = 10) -> str:
-    from partner_client._git_helpers import resolve_repo, run_git, GitError
+    from partner_client._git_helpers import resolve_repo, run_git, with_scope_warning, GitError
 
     try:
-        repo_path = resolve_repo(repo)
+        repo_path, scope_warning = resolve_repo(repo)
     except GitError as e:
         return f"Error: {e}"
 
@@ -48,4 +48,4 @@ def execute(repo: str, count: int = 10) -> str:
     rc, stdout, stderr = run_git(repo_path, args)
     if rc != 0:
         return f"git log failed: {stderr.strip()}"
-    return stdout or "(no commits yet)"
+    return with_scope_warning(stdout or "(no commits yet)", scope_warning)

@@ -39,7 +39,7 @@ def execute(repo: str, files: list | str | None = None) -> str:
     from partner_client._git_helpers import resolve_repo, run_git, GitError
 
     try:
-        repo_path = resolve_repo(repo, write=True)
+        repo_path, scope_warning = resolve_repo(repo, write=True)
     except GitError as e:
         return f"Error: {e}"
 
@@ -55,4 +55,7 @@ def execute(repo: str, files: list | str | None = None) -> str:
     rc, stdout, stderr = run_git(repo_path, ["add"] + file_list)
     if rc != 0:
         return f"git add failed: {stderr.strip()}"
-    return f"Staged: {', '.join(file_list)}"
+    result = f"Staged: {', '.join(file_list)}"
+    if scope_warning:
+        result = f"{scope_warning}\n\n{result}"
+    return result

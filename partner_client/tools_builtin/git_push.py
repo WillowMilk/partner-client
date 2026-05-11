@@ -59,10 +59,10 @@ def execute(repo: str, remote: str = "origin") -> str:
     The dispatch logic in client.py handles allowlist + operator approval;
     this function just shells out git push and returns the result.
     """
-    from partner_client._git_helpers import resolve_repo, run_git, GitError
+    from partner_client._git_helpers import resolve_repo, run_git, with_scope_warning, GitError
 
     try:
-        repo_path = resolve_repo(repo, write=True)
+        repo_path, scope_warning = resolve_repo(repo, write=True)
     except GitError as e:
         return f"Error: {e}"
 
@@ -73,4 +73,4 @@ def execute(repo: str, remote: str = "origin") -> str:
         # can react conversationally.
         return f"git push failed: {stderr.strip() or stdout.strip()}"
     output = (stdout.strip() + "\n" + stderr.strip()).strip()
-    return output or "git push succeeded (no output)."
+    return with_scope_warning(output or "git push succeeded (no output).", scope_warning)

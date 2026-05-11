@@ -48,7 +48,7 @@ def execute(repo: str, message: str) -> str:
     from partner_client._git_helpers import resolve_repo, run_git, GitError
 
     try:
-        repo_path = resolve_repo(repo, write=True)
+        repo_path, scope_warning = resolve_repo(repo, write=True)
     except GitError as e:
         return f"Error: {e}"
 
@@ -75,4 +75,7 @@ def execute(repo: str, message: str) -> str:
         # surface that case clearly.
         msg = stderr.strip() or stdout.strip() or "nothing to commit (staged tree empty?)"
         return f"git commit failed: {msg}"
-    return stdout.strip() or "Commit recorded."
+    result = stdout.strip() or "Commit recorded."
+    if scope_warning:
+        result = f"{scope_warning}\n\n{result}"
+    return result

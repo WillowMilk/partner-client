@@ -32,14 +32,14 @@ TOOL_DEFINITION = {
 
 
 def execute(repo: str) -> str:
-    from partner_client._git_helpers import resolve_repo, run_git, GitError
+    from partner_client._git_helpers import resolve_repo, run_git, with_scope_warning, GitError
 
     try:
-        repo_path = resolve_repo(repo)
+        repo_path, scope_warning = resolve_repo(repo)
     except GitError as e:
         return f"Error: {e}"
 
     rc, stdout, stderr = run_git(repo_path, ["status", "-sb"])
     if rc != 0:
         return f"git status failed: {stderr.strip()}"
-    return stdout or "(working tree clean)"
+    return with_scope_warning(stdout or "(working tree clean)", scope_warning)
