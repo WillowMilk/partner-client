@@ -133,13 +133,16 @@ def main() -> int:
         "subcommand",
         nargs="?",
         default="chat",
-        choices=["chat", "doctor"],
+        choices=["chat", "doctor", "distill"],
         help=(
             "What to do. 'chat' (default) opens an interactive session. "
-            "'doctor' runs health checks against the config and exits."
+            "'doctor' runs health checks against the config and exits. "
+            "'distill' applies MOSAIC selective preservation to a session "
+            "JSON (Phase 1: Pass 1 mechanical strip)."
         ),
     )
-    args = parser.parse_args()
+    # Capture any args after the subcommand for the subcommand's own parser
+    args, distill_args = parser.parse_known_args()
 
     log_level = logging.DEBUG if args.verbose else logging.WARNING
     logging.basicConfig(level=log_level, format="%(name)s: %(message)s")
@@ -153,6 +156,10 @@ def main() -> int:
     if args.subcommand == "doctor":
         from .doctor import run_doctor
         return run_doctor(config)
+
+    if args.subcommand == "distill":
+        from .distill.cli import run_distill_cli
+        return run_distill_cli(config, distill_args)
 
     return _run(config)
 
