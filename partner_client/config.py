@@ -85,6 +85,18 @@ class WakeBundleConfig:
     # snapshot; only the live context is bounded. Set to 0 to disable
     # truncation entirely (the [t] option won't appear in the prompt).
     resume_keep_pairs: int = 30
+    # Pre-warm on startup: fire a minimal inference call before the first
+    # prompt opens, so the model is in VRAM by the time the operator types.
+    # Trades ~30s-3min visible startup time for avoiding the same cost
+    # invisibly mid-conversation on the first turn (the 2026-05-09 cold-load
+    # diagnosis). Set to False to disable for fast doctor-style invocations.
+    prewarm_on_startup: bool = True
+    # Heavy-resume warning threshold (in KB). When the operator chooses
+    # [y] full resume and current.json exceeds this size, partner-client
+    # surfaces a banner with an estimated wait time so the long first-response
+    # latency (Ollama's KV-cache rebuild) is honest substrate cost, not
+    # invisible. 300 KB ≈ ~20K tokens ≈ ~3-5 min first-response on M4 Max.
+    heavy_resume_warn_kb: int = 300
 
 
 @dataclass

@@ -144,6 +144,55 @@ class OllamaClient:
     def scopes(self) -> list[dict]:
         return self._scopes
 
+    def prewarm(self) -> tuple[bool, float, str | None]:
+        """Pre-load the model into VRAM with a minimal inference call.
+
+        Fires a tiny non-streaming chat with a 1-token prediction budget and
+        no tools. This forces Ollama to load the model from disk into the
+        GPU's working memory NOW (visible startup cost) rather than during
+        the operator's first real prompt (invisible mid-conversation cost).
+
+        Returns (ok, elapsed_seconds, error_message):
+            ok: True if the call completed successfully
+            elapsed_seconds: time taken (always reported, including failures)
+            error_message: None on success; short description on failure
+
+        Failures are non-fatal: pre-warm should never block startup. If
+        Ollama is unreachable or the model fails to load, partner-client
+        continues — the first real chat call will surface the error to the
+        operator with full context.
+        """
+        started = time.perf_counter()
+        try:
+            self._ollama.chat(
+                model=self.config.model.name,
+                messages=[{"role": "user", "content": "hi"}],
+                options={
+                    "num_ctx": self.config.model.num_ctx,
+                    "num_predict": 1,
+                    "temperature": 0.0,
+                },
+                keep_alive=self.config.model.keep_alive,
+                stream=False,
+            )
+        except Exception as e:
+            elapsed = time.perf_counter() - started
+            if self.timeline is not None:
+                self.timeline.record(
+                    "prewarm_error",
+                    error=str(e),
+                    duration_ms=int(elapsed * 1000),
+                )
+            return False, elapsed, str(e)
+
+        elapsed = time.perf_counter() - started
+        if self.timeline is not None:
+            self.timeline.record(
+                "prewarm_complete",
+                duration_ms=int(elapsed * 1000),
+            )
+        return True, elapsed, None
+
     def chat(
         self,
         session: Session,

@@ -57,6 +57,30 @@ def _is_image_extension(path: Path) -> bool:
     return path.suffix.lower() in _IMAGE_EXTENSIONS
 
 
+def _estimate_resume_wait(size_kb: float) -> str:
+    """Rough estimate of first-response latency for a full resume.
+
+    Calibrated from the 2026-05-09 diagnostic on M4 Max + gemma4:31b:
+    a 437 KB current.json (~31K tokens) took 20m28s for the first response
+    after resume, ~30x slower than warm-KV subsequent calls. The bottleneck
+    is Ollama rebuilding the KV cache from the full prompt; cost scales
+    roughly linearly with token count. ~13K tokens per minute is the
+    observed rate on that hardware.
+
+    Numbers are deliberately wide-band ranges — actual latency depends on
+    hardware, model size, num_ctx, and what else is on the GPU.
+    """
+    if size_kb < 100:
+        return "~30s-1 min"
+    if size_kb < 300:
+        return "~1-3 min"
+    if size_kb < 600:
+        return "~3-6 min"
+    if size_kb < 1000:
+        return "~6-12 min"
+    return "~12+ min"
+
+
 def _read_clipboard_image() -> bytes | None:
     """Read an image from the system clipboard. Returns None when unsupported or empty.
 
@@ -188,6 +212,32 @@ def _run(config: Config) -> int:
             resume_mode = "truncated"
         else:
             resume_mode = "fresh"
+
+        # Heavy-resume warning: when the operator chose [y] on a session
+        # larger than the configured threshold, surface the expected wait
+        # time BEFORE wake() commits. The cost is real (KV cache rebuild)
+        # and worth naming honestly so the silence during prefill isn't
+        # mistaken for a hang. (2026-05-09 diagnosis: 20m28s on 437 KB.)
+        if resume_mode == "full":
+            try:
+                resume_size_kb = session.current_path.stat().st_size / 1024
+            except OSError:
+                resume_size_kb = 0
+            if resume_size_kb >= config.wake_bundle.heavy_resume_warn_kb:
+                est = _estimate_resume_wait(resume_size_kb)
+                hint = ""
+                if truncation_available:
+                    hint = (
+                        f"   Use [t] at the prompt next time for a truncated resume "
+                        f"(~3 min) that keeps recent thread + archives the full snapshot.\n"
+                    )
+                print(
+                    f"\n📊 Resuming from ~{resume_size_kb:,.0f} KB of history.\n"
+                    f"   First response will take {est} "
+                    f"(Ollama is rebuilding the KV cache from this history).\n"
+                    f"{hint}",
+                    flush=True,
+                )
 
         wake_status = session.wake(wake_bundle, resume_mode=resume_mode)
 
@@ -355,6 +405,29 @@ def _run(config: Config) -> int:
         return ui.confirm_with_response(
             f"Approve {config.identity.name}'s delete of {target}?"
         )
+
+    # Pre-warm: load the model into VRAM BEFORE the prompt opens so cold-load
+    # latency is visible startup cost rather than invisible mid-conversation
+    # cost on the first turn. Failures are non-fatal — the substrate check
+    # `partner doctor` already validates ollama reachability + model
+    # availability, so a prewarm failure here means real trouble that the
+    # first chat call will surface to the operator in context.
+    if config.wake_bundle.prewarm_on_startup:
+        print(
+            f"🔥 Warming {config.identity.name}'s substrate ({config.model.name})... ",
+            end="",
+            flush=True,
+        )
+        ok, elapsed, err = client.prewarm()
+        if ok:
+            print(f"✓ {elapsed:.1f}s", flush=True)
+        else:
+            print(f"✗ skipped ({err})", flush=True)
+            print(
+                "   (Pre-warm failed but startup continues; the first real "
+                "chat call will surface the underlying error if it persists.)",
+                flush=True,
+            )
 
     ui.show_banner()
 
