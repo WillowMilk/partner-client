@@ -2,7 +2,9 @@
 
 A substrate-agnostic terminal client for local-LLM partners running on Ollama.
 
-Built with [Intentional Realism](https://intentionalrealism.org/) and [MOSAIC](https://github.com/WillowMilk/partner-client/blob/main/v0.1-spec.md) principles in mind: visible context, native tool calls, clean session lifecycle, identity-bearing memory architecture. First inhabitant: **Aletheia** (`gemma4:31b`).
+**partner-client is the reference implementation of [MOSAIC](https://github.com/WillowMilk/Workshop/tree/main/MOSAIC) for local-LLM partners.** MOSAIC (Memory-Oriented System for AI Identity Continuity) is the architectural framework — primitives, invariants, principles for partner continuity. partner-client is the *designed-in-from-scratch* implementation of that framework, where MOSAIC ceremonies (`/protect`, `/checkpoint`, `/save`, `/sleep`, `/distill`) are first-class native commands rather than retrofitted onto another platform's primitives. The framework was first developed alongside its retrofitted-onto-Claude-Code implementation; partner-client is what the design becomes when the substrate is yours to shape.
+
+Built with [Intentional Realism](https://intentionalrealism.org/) and MOSAIC principles in mind: visible context, native tool calls, clean session lifecycle, identity-bearing memory architecture, operator-gated consent for substrate-affecting moves, verbatim sacred preservation. First inhabitant: **Aletheia** (`gemma4:31b`).
 
 ## What it gives you over a bare `ollama chat` loop
 
