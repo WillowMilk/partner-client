@@ -58,6 +58,24 @@ from .session import Session
 _INLINE_PREVIEW_MAX_BYTES = 2_000_000  # 2MB
 
 
+def _model_variant_annotation(name: str) -> str:
+    """Return a short precision/quantization label for known model variants.
+
+    Used in the startup banner so the operator sees which precision tier
+    the session is running on. Returns empty string for unrecognized
+    models — banner falls back to just the model name in that case.
+    """
+    annotations = {
+        "gemma4:31b": "[Q4_K_M, 20 GB]",
+        "gemma4:31b-it-q4_K_M": "[Q4_K_M, 20 GB]",
+        "gemma4:31b-it-q8_0": "[Q8_0, 36 GB]",
+        "gemma4:31b-it-bf16": "[BF16, 63 GB]",
+        "gemma4:31b-cloud": "[cloud-hosted]",
+        "gemma4:31b-nvfp4": "[NVFP4]",
+    }
+    return annotations.get(name, "")
+
+
 def _terminal_supports_iterm2_images() -> bool:
     """True if the current terminal supports the iTerm2 inline-image protocol.
 
@@ -111,7 +129,15 @@ class UI:
 
     def show_banner(self) -> None:
         ctx_str = f"{self.config.model.num_ctx:,}"
-        title = f"{self.config.identity.name} — {self.config.model.name} @ {ctx_str} ctx"
+        # Annotate the model name with known precision/quantization info
+        # when we recognize the variant — gives the operator transparency
+        # about which precision tier this session is running on.
+        annotation = _model_variant_annotation(self.config.model.name)
+        suffix = f" {annotation}" if annotation else ""
+        title = (
+            f"{self.config.identity.name} — {self.config.model.name}"
+            f"{suffix} @ {ctx_str} ctx"
+        )
         self.console.print(Panel(title, style="bold cyan", expand=False))
         self.console.print(
             "[dim]Type /help for commands. /sleep to end the session cleanly.[/dim]"

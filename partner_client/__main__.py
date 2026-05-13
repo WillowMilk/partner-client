@@ -130,6 +130,25 @@ def main() -> int:
         help="Enable verbose logging",
     )
     parser.add_argument(
+        "--model",
+        "-m",
+        default=None,
+        help=(
+            "Override the TOML's [model] name for this session only "
+            "(e.g. gemma4:31b-it-q8_0, gemma4:31b-it-bf16, gemma4:31b-cloud). "
+            "TOML stays unmodified. Fails fast if model is not pulled locally."
+        ),
+    )
+    parser.add_argument(
+        "--choose-model",
+        action="store_true",
+        help=(
+            "Show an interactive picker at startup listing locally-pulled "
+            "models. Result overrides TOML for this session only. Cannot be "
+            "combined with --model (--model wins if both are passed)."
+        ),
+    )
+    parser.add_argument(
         "subcommand",
         nargs="?",
         default="chat",
@@ -155,11 +174,29 @@ def main() -> int:
 
     if args.subcommand == "doctor":
         from .doctor import run_doctor
+        # Doctor still respects --model override so operators can validate
+        # a specific variant without editing TOML.
+        if args.model is not None:
+            config.model.name = args.model
         return run_doctor(config)
 
     if args.subcommand == "distill":
         from .distill.cli import run_distill_cli
         return run_distill_cli(config, distill_args)
+
+    # Resolve which model to use (chat path only — doctor/distill above are
+    # subcommand short-circuits). CLI flag wins over interactive picker
+    # wins over TOML default. Fail-fast on unavailable model.
+    from .model_selector import resolve_active_model
+    resolved_name, error = resolve_active_model(
+        config_model_name=config.model.name,
+        cli_override=args.model,
+        use_interactive=args.choose_model,
+    )
+    if error is not None:
+        print(error, file=sys.stderr)
+        return 2
+    config.model.name = resolved_name
 
     return _run(config)
 
