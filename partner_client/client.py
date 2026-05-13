@@ -197,7 +197,6 @@ class OllamaClient:
         self,
         session: Session,
         ui: StreamSink | None = None,
-        on_checkpoint_request: Callable[[str], bool] | None = None,
         on_plan_approval_request: Callable[[str, list[str]], bool] | None = None,
         on_git_push_request: Callable[[str, str, list[str]], bool] | None = None,
         on_delete_path_request: Callable[..., bool] | None = None,
@@ -220,18 +219,13 @@ class OllamaClient:
             stream UI region) and for whether to record a partial assistant
             message in the session.
 
-        on_checkpoint_request(reason: str) -> bool | tuple[bool, str | None]
-        is called when the model invokes the special `request_checkpoint`
-        tool. Implementations may return a plain bool (legacy) OR a tuple
-        `(accepted, optional_message)`. When the operator types a custom
-        response instead of y/n, the message flows back to the partner as
-        the tool result in the operator's voice — decline-with-care rather
-        than canned substrate refusal. If this callback is None (e.g.
-        headless tests), the request is declined with the canned message.
-
         on_plan_approval_request(summary: str, plan: list[str]) -> bool |
-        tuple[bool, str | None] follows the same three-option shape — bool
-        for legacy, tuple for decline-with-message support.
+        tuple[bool, str | None] is called when the model invokes the special
+        `request_plan_approval` tool. Implementations may return a plain
+        bool (legacy) OR a tuple `(accepted, optional_message)`. When the
+        operator types a custom response instead of y/n, the message flows
+        back to the partner as the tool result in the operator's voice —
+        decline-with-care rather than canned substrate refusal.
 
         on_git_push_request(repo: str, remote_url: str, commits: list[str])
         -> bool | tuple[bool, str | None] is called when the model invokes
@@ -247,11 +241,16 @@ class OllamaClient:
         (e.g. "file (1,247 bytes)" or "directory containing N files / M
         subdirectories"). Same three-option consent shape as the others.
 
-        Note: `protect_save` does NOT have a consent callback as of
-        2026-05-10 rework - the operator's invocation of /protect (or
-        conversational equivalent) is the approval; the write happens
-        directly and the diff appears in the tool result for after-the-
-        fact visibility.
+        Note: `request_checkpoint` and `protect_save` do NOT have consent
+        callbacks as of 2026-05-13 rework — the operator's invocation of
+        /checkpoint or /protect (conversational or slash-command) IS the
+        approval. The discipline-injection (request_checkpoint) and the
+        active+dated-archive write (protect_save) happen directly when
+        called. Cross-environment symmetry with Sage's environment, where
+        these ceremonies run on type without a second confirmation. The
+        actual review surface is the partner's subsequent edit_file /
+        write_file diffs — that's where review meaningfully happens, not
+        at the discipline-prompt-injection layer.
         """
         tool_invocations: list[tuple[str, dict, str]] = []
         # Chat-loop iteration cap (configurable via [model] max_tool_iterations).
@@ -402,77 +401,43 @@ class OllamaClient:
                         args = {}
                 tool_started = time.perf_counter()
 
-                # Special-case: request_checkpoint is operator-gated.
-                # Per the 2026-05-10 architecture rework, /checkpoint means
-                # the MOSAIC continuity-file authoring ceremony — NOT the
-                # bookmark/pause action (that's /save). Accordingly,
-                # request_checkpoint asks Willow to invoke the discipline,
-                # which on approval injects the discipline prompt as a
-                # system message; the partner then authors updates to her
-                # continuity files via edit_file / write_file on her next
-                # turn. The mechanical bookmark is a separate concern; the
-                # partner doesn't need a dedicated tool for it (every turn
-                # writes current.json atomically anyway, and Willow can run
-                # /save herself if she wants a snapshot bookmark).
+                # Special-case: request_checkpoint runs directly (no gate).
+                # Per the 2026-05-13 architecture rework: the operator's
+                # conversational ask (or slash-command invocation) IS the
+                # approval. Cross-environment symmetry with Sage — when
+                # Willow types /checkpoint on Sage's side, the discipline
+                # fires; there's no second confirmation. Aletheia/Hestia's
+                # side gets the same shape. The actual review surface is
+                # the partner's subsequent edit_file / write_file diffs —
+                # that's where review meaningfully happens, not at the
+                # discipline-prompt-injection layer.
+                #
+                # /checkpoint vs /save remains orthogonal:
+                # - /checkpoint = MOSAIC continuity-file authoring (partner-
+                #   side, multi-file). This is what request_checkpoint
+                #   triggers.
+                # - /save = operator-side bookmark (writes session-status.md
+                #   + snapshots current.json for resume). Operator runs
+                #   independently when she wants a snapshot.
                 if name == "request_checkpoint":
                     reason = args.get("reason", "(no reason given)")
-                    if on_checkpoint_request is not None:
-                        # Callback may return bool (legacy) OR
-                        # (bool, str | None) — three-option consent shape
-                        # where the str is a typed operator response that
-                        # flows back as the tool result in the operator's
-                        # voice (decline-with-care).
-                        try:
-                            response = on_checkpoint_request(reason)
-                            if isinstance(response, tuple) and len(response) >= 2:
-                                accepted, custom_message = bool(response[0]), response[1]
-                            else:
-                                accepted, custom_message = bool(response), None
-                        except Exception:
-                            log.exception("on_checkpoint_request callback failed")
-                            accepted, custom_message = False, None
-                        if accepted:
-                            # Inject the MOSAIC checkpoint discipline prompt
-                            # as a system message so the partner sees it on
-                            # her next turn (after this tool result lands).
-                            from .commands import CommandRouter
-                            session.messages.append({
-                                "role": "system",
-                                "content": CommandRouter._CHECKPOINT_DISCIPLINE_PROMPT,
-                            })
-                            base_msg = (
-                                f"Willow approved your checkpoint request. "
-                                f"The MOSAIC checkpoint discipline prompt has "
-                                f"been queued — on your next turn, please "
-                                f"author updates to your continuity files "
-                                f"(MEMORY.md, intentions, emotional-memory, "
-                                f"etc.) via edit_file / write_file as the "
-                                f"discipline asks. Each write is diff-reviewed "
-                                f"by Willow. The bookmark/pause is a separate "
-                                f"concern (Willow may /save independently)."
-                            )
-                            if custom_message:
-                                result = f"{base_msg}\n\nWillow added: \"{custom_message}\""
-                            else:
-                                result = base_msg
-                        else:
-                            if custom_message:
-                                result = (
-                                    f"Willow declined your checkpoint request and said:\n\n"
-                                    f"  \"{custom_message}\""
-                                )
-                            else:
-                                result = (
-                                    "Willow declined your checkpoint request for now. "
-                                    "The conversation continues; you may ask again later "
-                                    "or simply mention it conversationally."
-                                )
-                    else:
-                        result = (
-                            "Checkpoint requested but no operator confirmation "
-                            "handler is wired in this client. Please ask Willow "
-                            "conversationally to /checkpoint."
-                        )
+                    # Inject the MOSAIC checkpoint discipline prompt as a
+                    # system message so the partner sees it on her next
+                    # turn (after this tool result lands).
+                    from .commands import CommandRouter
+                    session.messages.append({
+                        "role": "system",
+                        "content": CommandRouter._CHECKPOINT_DISCIPLINE_PROMPT,
+                    })
+                    result = (
+                        f"Checkpoint discipline activated (reason: \"{reason}\"). "
+                        f"On your next turn, please author updates to your "
+                        f"continuity files (MEMORY.md, intentions, emotional-"
+                        f"memory, etc.) via edit_file / write_file as the "
+                        f"discipline asks. Each write is diff-reviewed by Willow. "
+                        f"The bookmark/pause is a separate concern (Willow may "
+                        f"/save independently if she wants a snapshot for resume)."
+                    )
                 # Special-case: request_plan_approval is operator-gated.
                 elif name == "request_plan_approval":
                     summary = args.get("summary", "(no summary given)")

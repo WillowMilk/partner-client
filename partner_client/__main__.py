@@ -298,31 +298,6 @@ def _run(config: Config) -> int:
     client = OllamaClient(config, tools, timeline=timeline)
     commands = CommandRouter(config, session, tools)
 
-    def on_checkpoint_request(reason: str) -> tuple[bool, str | None]:
-        """Surface a partner's request_checkpoint() call to the operator.
-
-        Shows the reason in a prominent panel, then offers three-option
-        consent (y / n / typed-response). Returns (accepted, optional_message)
-        — when the operator types a response instead of y/n, that message
-        flows back to the partner as the tool result.
-        """
-        ui.show_command_output(
-            f"📋  {config.identity.name} is asking to /checkpoint.\n\n"
-            f"Reason: {reason}\n\n"
-            f"If you accept, a session-status record will be written and "
-            f"current.json snapshotted. The conversation will continue either way."
-        )
-        timeline.record("checkpoint_requested", reason=reason)
-        decision = ui.confirm_with_response(
-            f"Accept {config.identity.name}'s checkpoint request?"
-        )
-        timeline.record(
-            "checkpoint_decision",
-            accepted=decision[0],
-            custom_message=bool(decision[1]),
-        )
-        return decision
-
     def on_plan_approval_request(summary: str, plan: list[str]) -> tuple[bool, str | None]:
         """Surface a partner's request_plan_approval() call to the operator.
 
@@ -633,7 +608,6 @@ def _run(config: Config) -> int:
             response = client.chat(
                 session,
                 ui=ui,
-                on_checkpoint_request=on_checkpoint_request,
                 on_plan_approval_request=on_plan_approval_request,
                 on_git_push_request=on_git_push_request,
                 on_delete_path_request=on_delete_path_request,
