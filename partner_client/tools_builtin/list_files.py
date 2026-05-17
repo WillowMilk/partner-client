@@ -44,7 +44,7 @@ TOOL_DEFINITION = {
 
 def execute(scope: str = "memory", subpath: str = "") -> str:
     try:
-        from partner_client.paths import list_scopes
+        from partner_client.paths import list_scopes, verify_path_under_base, PathError
     except ImportError:
         return "Error: path resolver not available; client may be misconfigured."
     scopes = list_scopes()
@@ -57,6 +57,12 @@ def execute(scope: str = "memory", subpath: str = "") -> str:
 
     base = target.path.expanduser()
     full = (base / subpath) if subpath else base
+    # Defense: enforce that subpath cannot escape the scope (`..` traversal,
+    # symlinks, absolute-path-injection where `base / "/etc"` returns `/etc`).
+    try:
+        full = verify_path_under_base(full, base, label=f"scope '{scope}'")
+    except PathError as e:
+        return f"Error: {e}"
     if not full.is_dir():
         return f"Error: not a directory: {full}"
 

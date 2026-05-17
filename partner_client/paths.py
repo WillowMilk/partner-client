@@ -100,34 +100,53 @@ def _scope_resolved(scope: Scope) -> Path:
         return expanded
 
 
-def _verify_under_scope(constructed: Path, scope: Scope) -> Path:
-    """Resolve `constructed` and verify it stays under scope.path.
+def verify_path_under_base(
+    constructed: Path,
+    base: Path,
+    label: str = "base",
+) -> Path:
+    """Resolve `constructed` and verify it stays under `base`.
 
-    Defends against `..`-traversal from scope-qualified or bare-filename
-    inputs (e.g. 'memory:../../etc/passwd'). The absolute-path branch in
-    resolve_path is already defended because Path.resolve() collapses `..`
-    before its relative_to check; this helper applies the same protection
-    to the relative-construction branches.
+    Defends against `..`-traversal and symlink-escape from any caller that
+    builds a path by joining a base directory with a user-supplied fragment.
+    Tool callers (list_files, glob_files, grep_files, hub_read_letter) use
+    this to enforce that their joined paths stay within the boundary the
+    operator configured, not somewhere the partner's argument could redirect.
 
-    Returns the resolved path on success. Raises PathError if the resolved
-    path is outside the scope.
+    `label` is shown in the error message to name what the partner thought
+    they were operating in (e.g. "scope 'memory'", "Hub root").
+
+    Returns the resolved path on success. Raises PathError on escape.
     """
-    scope_resolved = _scope_resolved(scope)
-    constructed_expanded = constructed.expanduser()
+    base_expanded = Path(base).expanduser()
+    try:
+        base_resolved = base_expanded.resolve(strict=False)
+    except (OSError, RuntimeError):
+        base_resolved = base_expanded
+    constructed_expanded = Path(constructed).expanduser()
     try:
         constructed_resolved = constructed_expanded.resolve(strict=False)
     except (OSError, RuntimeError):
         constructed_resolved = constructed_expanded
     try:
-        constructed_resolved.relative_to(scope_resolved)
+        constructed_resolved.relative_to(base_resolved)
     except ValueError:
         raise PathError(
             f"Path '{constructed}' resolves to '{constructed_resolved}', "
-            f"which is outside scope '{scope.name}' ({scope_resolved}). "
+            f"which is outside {label} ({base_resolved}). "
             f"This often means the path contains '..' or follows a symlink "
-            f"out of the scope."
+            f"out of the boundary."
         ) from None
     return constructed_resolved
+
+
+def _verify_under_scope(constructed: Path, scope: Scope) -> Path:
+    """Thin wrapper around verify_path_under_base for Scope objects."""
+    return verify_path_under_base(
+        constructed,
+        scope.path,
+        label=f"scope '{scope.name}'",
+    )
 
 
 def resolve_path(filename: str, write: bool = False) -> Path:

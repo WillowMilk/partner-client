@@ -85,13 +85,35 @@ def execute(
     if not base.is_dir():
         return f"Error: scope path not a directory: {base}"
 
+    # Defense: same guard as glob_files. `..` segments or absolute patterns
+    # would let `glob` reach outside the scope; reject them and filter results.
+    normalized = glob.replace("\\", "/")
+    glob_parts = normalized.split("/")
+    if ".." in glob_parts:
+        return f"Error: glob '{glob}' contains '..', which is not permitted."
+    if normalized.startswith("/") or (len(normalized) >= 2 and normalized[1] == ":"):
+        return f"Error: glob '{glob}' is absolute; provide a path relative to scope '{scope}'."
+
     try:
         max_matches = max(1, min(int(max_matches), 200))
     except (TypeError, ValueError):
         max_matches = 50
 
     try:
-        candidates = [p for p in base.glob(glob) if p.is_file()]
+        base_resolved = base.resolve(strict=False)
+    except (OSError, RuntimeError):
+        base_resolved = base
+
+    try:
+        candidates = []
+        for p in base.glob(glob):
+            if not p.is_file():
+                continue
+            try:
+                p.resolve(strict=False).relative_to(base_resolved)
+            except (ValueError, OSError):
+                continue  # defense in depth
+            candidates.append(p)
     except (ValueError, OSError) as e:
         return f"Error in glob '{glob}': {e}"
 

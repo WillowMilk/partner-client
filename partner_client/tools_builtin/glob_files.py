@@ -57,12 +57,36 @@ def execute(pattern: str, scope: str = "memory") -> str:
         available = ", ".join(s.name for s in scopes)
         return f"Error: unknown scope '{scope}'. Available scopes: {available}"
 
+    # Defense: refuse patterns that try to leave the scope. `..` in any
+    # segment can climb out; absolute patterns (`/etc/*`, `C:\...`) bypass
+    # the base join entirely. We reject these explicitly AND filter results
+    # below in case Path.glob's behavior varies across Python versions.
+    normalized = pattern.replace("\\", "/")
+    pattern_parts = normalized.split("/")
+    if ".." in pattern_parts:
+        return f"Error: pattern '{pattern}' contains '..', which is not permitted."
+    if normalized.startswith("/") or (len(normalized) >= 2 and normalized[1] == ":"):
+        return f"Error: pattern '{pattern}' is absolute; provide a path relative to scope '{scope}'."
+
     base = target.path.expanduser()
     if not base.is_dir():
         return f"Error: scope '{scope}' path is not a directory: {base}"
 
     try:
-        matches = [p for p in base.glob(pattern) if p.is_file()]
+        base_resolved = base.resolve(strict=False)
+    except (OSError, RuntimeError):
+        base_resolved = base
+
+    try:
+        matches = []
+        for p in base.glob(pattern):
+            if not p.is_file():
+                continue
+            try:
+                p.resolve(strict=False).relative_to(base_resolved)
+            except (ValueError, OSError):
+                continue  # defense in depth: drop anything that resolved outside base
+            matches.append(p)
     except (ValueError, OSError) as e:
         return f"Error globbing '{pattern}': {e}"
 
