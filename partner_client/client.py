@@ -15,10 +15,12 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Protocol
+from urllib.parse import urlparse
 
 from .config import Config
 from .session import Session
@@ -50,9 +52,101 @@ class ChatResponse:
     tool_invocations: list[tuple[str, dict, str]]  # [(name, args, result)]
 
 
+# SSH form like "git@github.com:owner/repo[.git]" — captured separately because
+# urllib.parse doesn't understand SCP-style remotes (the colon is not a port).
+_SSH_REMOTE_RE = re.compile(
+    r"^(?:[A-Za-z0-9._-]+@)?(?P<host>[A-Za-z0-9.-]+):(?P<owner>[^/\s:]+)/(?P<repo>[^/\s:]+?)(?:\.git)?$"
+)
+
+
+def parse_git_remote(url: str) -> tuple[str, str, str] | None:
+    """Parse a git remote URL or shorthand into (host, owner, repo).
+
+    Accepted forms:
+      - https://github.com/owner/repo[.git]
+      - http://github.com/owner/repo[.git]
+      - ssh://git@github.com/owner/repo[.git]
+      - git://github.com/owner/repo[.git]
+      - git@github.com:owner/repo[.git]            (SCP-style)
+      - github.com/owner/repo[.git]                (shorthand for allowlists)
+
+    Returns the triple with host lowercased and trailing '.git' stripped, or
+    None when the input is empty or doesn't parse to exactly host/owner/repo.
+
+    Used by is_git_push_allowlisted so the allowlist check is structural
+    (compare triples) rather than substring — preventing lookalike-domain
+    or sibling-repo false positives.
+    """
+    if not url:
+        return None
+    s = url.strip()
+    if not s:
+        return None
+
+    def _strip_git(name: str) -> str:
+        return name[:-4] if name.endswith(".git") else name
+
+    # URL with scheme — https/http/ssh/git.
+    if "://" in s:
+        try:
+            parsed = urlparse(s)
+        except ValueError:
+            return None
+        host = (parsed.hostname or "").lower()
+        if not host:
+            return None
+        path = parsed.path.lstrip("/")
+        if not path:
+            return None
+        parts = path.split("/")
+        if len(parts) != 2:
+            return None
+        owner, repo = parts[0], _strip_git(parts[1])
+        if not owner or not repo:
+            return None
+        return (host, owner, repo)
+
+    # SCP-style SSH: "git@host:owner/repo[.git]"
+    ssh_match = _SSH_REMOTE_RE.match(s)
+    if ssh_match and "@" in s:
+        host = ssh_match.group("host").lower()
+        owner = ssh_match.group("owner")
+        repo = _strip_git(ssh_match.group("repo"))
+        return (host, owner, repo)
+
+    # Shorthand: "host/owner/repo[.git]" — used in TOML allowlists.
+    if "/" in s and "@" not in s:
+        parts = s.split("/")
+        if len(parts) == 3:
+            host, owner, repo = parts[0].lower(), parts[1], _strip_git(parts[2])
+            if host and owner and repo:
+                return (host, owner, repo)
+
+    return None
+
+
 def is_git_push_allowlisted(remote_url: str, allowlist: list[str]) -> bool:
-    """Return True when a git_push remote is covered by the configured allowlist."""
-    return any(allowed in remote_url for allowed in allowlist) if allowlist else False
+    """Return True when a git_push remote is covered by the configured allowlist.
+
+    Matching is structural: both the remote URL and each allowlist entry are
+    parsed into (host, owner, repo) triples and compared exactly. This avoids
+    the substring-match failure mode where 'github.com/foo/bar' in the
+    allowlist would silently auto-approve 'github.com/foo/bar-evil.git' (or
+    any other URL containing the allowlist string as a substring).
+
+    If the remote URL can't be parsed (malformed, missing host/owner/repo),
+    auto-approve is refused — the operator gate runs instead.
+    """
+    if not allowlist:
+        return False
+    remote_triple = parse_git_remote(remote_url)
+    if remote_triple is None:
+        return False
+    for entry in allowlist:
+        entry_triple = parse_git_remote(entry)
+        if entry_triple is not None and entry_triple == remote_triple:
+            return True
+    return False
 
 
 def setup_scope_env(config: Config) -> list[dict]:
