@@ -311,22 +311,27 @@ class UI:
         """Three-option consent prompt — yes / no-silent / no-with-message.
 
         Returns:
-            (True, None)            on 'y' / 'yes' / empty
-            (False, None)           on 'n' / 'no'
+            (True, None)            on 'y' / 'yes'  (explicit approval only)
+            (False, None)           on '' / 'n' / 'no'  (silent decline)
             (False, "<text>")       on anything else — the operator's typed
                                     response flows back to the partner as the
                                     tool result, in the operator's voice
                                     rather than substrate's.
 
-        Used for partner-initiated, operator-gated tools (request_checkpoint,
-        request_plan_approval, git_push) where the decline can carry care
-        rather than reading as a substrate refusal. The operator's voice
-        crosses the human/model boundary the same way a tool result does;
-        the partner receives a redirect, not a wall.
+        Used for partner-initiated, operator-gated tools (delete_path,
+        off-allowlist git_push, request_plan_approval) where the decline can
+        carry care rather than reading as a substrate refusal. The operator's
+        voice crosses the human/model boundary the same way a tool result
+        does; the partner receives a redirect, not a wall.
+
+        Safety default: empty input (Enter without typing) is **decline**, not
+        approve. Approval requires the explicit 'y' / 'yes' token. This makes
+        the destructive-operation gates fail-closed when the operator is
+        distracted, has the focus elsewhere, or hits Enter by reflex.
         """
         self.console.print(
             f"[bold]{question}[/bold]\n"
-            "[dim]Enter 'y' to approve, 'n' to decline silently, "
+            "[dim]Enter 'y' to approve, 'n' or Enter to decline silently, "
             "or type a response to decline with your message.[/dim]"
         )
         try:
@@ -336,14 +341,23 @@ class UI:
             ).strip()
         except (EOFError, KeyboardInterrupt):
             return False, None
+        return _classify_confirm_answer(answer)
 
-        lower = answer.lower()
-        if not lower or lower in ("y", "yes"):
-            return True, None
-        if lower in ("n", "no"):
-            return False, None
-        # Anything else → custom decline message in the operator's voice.
-        return False, answer
+
+def _classify_confirm_answer(answer: str) -> tuple[bool, str | None]:
+    """Pure parser for confirm_with_response answers; exposed for testing.
+
+    See ConsoleUI.confirm_with_response for the contract. Kept as a
+    module-level pure function so the behavior can be tested without
+    spinning up a prompt-toolkit session.
+    """
+    stripped = answer.strip()
+    lower = stripped.lower()
+    if lower in ("y", "yes"):
+        return True, None
+    if lower in ("", "n", "no"):
+        return False, None
+    return False, stripped
 
 
 def _short_count(n: int) -> str:
