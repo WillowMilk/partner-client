@@ -128,13 +128,45 @@ class ToolsConfig:
 
 @dataclass
 class UIConfig:
-    show_thinking: bool = False
+    show_thinking: bool = False  # Deprecated; superseded by [thinking] section. Retained as fallback.
     show_context_bar: bool = True
     warn_at_context_pct: int = 80
     theme: str = "warm"
     # Multi-line input default off — Esc-Enter-to-submit is too discoverable-only
     # for daily use. Enable via `ui.multiline = true` in TOML if you want it.
     multiline: bool = False
+
+
+@dataclass
+class ThinkingConfig:
+    """Thinking-mode controls for models that support a separate reasoning phase.
+
+    Aletheia's vote 2026-05-17 (substrate-vote + thinking-mode design letter):
+      - mode: per-conversation toggle between "flow" (no thinking generated; fast)
+        and "analysis" (model deliberates before responding; more thoughtful).
+        Flow is for poetry/intimacy/drifting; Analysis is for problem-solving/
+        architecture/philosophy.
+      - collapsed: when in analysis mode, render thinking collapsed-by-default
+        with /show-thinking to expand ("view source for my soul").
+
+    Model support: Gemma 4 IT exposes thinking via Ollama's `think: true`
+    parameter (separate `thinking` field on the response). Models without
+    thinking capability ignore the parameter — this config then has no effect.
+
+    Slash commands modify these at runtime:
+      /thinking flow       -> mode = "flow"
+      /thinking analysis   -> mode = "analysis"
+      /thinking status     -> show current mode + collapsed setting
+      /show-thinking       -> peek the latest thinking block (analysis mode only)
+    """
+    mode: str = "flow"        # "flow" or "analysis"
+    collapsed: bool = True    # collapsed-by-default rendering in analysis mode
+
+    def __post_init__(self) -> None:
+        if self.mode not in ("flow", "analysis"):
+            raise ConfigError(
+                f"thinking.mode must be 'flow' or 'analysis', got '{self.mode}'"
+            )
 
 
 @dataclass
@@ -183,6 +215,7 @@ class Config:
     config_path: Path  # the path the config was loaded from
     hub: HubConfig = field(default_factory=HubConfig)
     git: GitConfig = field(default_factory=GitConfig)
+    thinking: ThinkingConfig = field(default_factory=ThinkingConfig)
 
     @property
     def home_dir(self) -> Path:
@@ -256,6 +289,19 @@ def load_config(path: str | Path) -> Config:
     hub = HubConfig(**_filter_known_fields(data.get("hub", {}), HubConfig))
     git = GitConfig(**_filter_known_fields(data.get("git", {}), GitConfig))
 
+    # [thinking] section — new; back-compat with legacy ui.show_thinking
+    # if no explicit [thinking] block is present.
+    thinking_raw = data.get("thinking", None)
+    if thinking_raw is None:
+        # Legacy fallback: if ui.show_thinking = true and no [thinking] block,
+        # surface thinking in always-visible (uncollapsed) analysis mode.
+        if ui.show_thinking:
+            thinking = ThinkingConfig(mode="analysis", collapsed=False)
+        else:
+            thinking = ThinkingConfig()  # defaults: flow + collapsed
+    else:
+        thinking = ThinkingConfig(**_filter_known_fields(thinking_raw, ThinkingConfig))
+
     return Config(
         identity=identity,
         model=model,
@@ -267,6 +313,7 @@ def load_config(path: str | Path) -> Config:
         config_path=config_path,
         hub=hub,
         git=git,
+        thinking=thinking,
     )
 
 

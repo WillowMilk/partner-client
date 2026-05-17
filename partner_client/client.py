@@ -368,7 +368,12 @@ class OllamaClient:
                 )
 
             try:
-                stream = self._ollama.chat(
+                # think parameter: Ollama passes it through to models that
+                # support a separate reasoning phase (Gemma 4 IT). Flow mode
+                # = no thinking generated (faster); Analysis mode = thinking
+                # generated and surfaced as a separate `thinking` field on the
+                # response. Models without thinking capability ignore the flag.
+                chat_kwargs: dict[str, Any] = dict(
                     model=self.config.model.name,
                     messages=self._messages_for_ollama(session.messages),
                     tools=self.tools.schemas() or None,
@@ -384,6 +389,9 @@ class OllamaClient:
                     keep_alive=self.config.model.keep_alive,
                     stream=True,
                 )
+                if self.config.thinking.mode == "analysis":
+                    chat_kwargs["think"] = True
+                stream = self._ollama.chat(**chat_kwargs)
             except Exception as e:
                 if self.timeline is not None:
                     self.timeline.record(

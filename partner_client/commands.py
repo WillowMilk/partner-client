@@ -20,6 +20,7 @@ class CommandResult:
     output: str          # text to display
     should_exit: bool = False  # True for /sleep
     should_reload: bool = False  # True for /reload-config
+    expand_thinking: str | None = None  # /show-thinking: thinking text to render expanded
 
 
 CommandHandler = Callable[..., CommandResult]
@@ -30,6 +31,10 @@ class CommandRouter:
         self.config = config
         self.session = session
         self.tools = tools
+        # Latest thinking block from this session — set by __main__ after each
+        # assistant response that produced thinking. /show-thinking reads from
+        # here to render the peek-expand even when collapsed-by-default.
+        self.last_thinking: str | None = None
         self._commands: dict[str, tuple[str, CommandHandler]] = {
             "/help": ("Show all available slash commands.", self._cmd_help),
             "/protect": ("Ask the partner to author a MOSAIC protected-context file (verbatim sacred exchanges).", self._cmd_protect),
@@ -43,6 +48,8 @@ class CommandRouter:
             "/intentions": ("Surface pending items from your Intentions.md (prospective memory).", self._cmd_intentions),
             "/plans": ("List recent durable plans (or filter by status, or show one plan by id).", self._cmd_plans),
             "/timeline": ("Show recent run-timeline events. Filter by N, category, or detail <index>.", self._cmd_timeline),
+            "/thinking": ("Toggle thinking-mode (flow / analysis / status). 'flow' = no thinking, fast; 'analysis' = deliberate before answering.", self._cmd_thinking),
+            "/show-thinking": ("Expand the latest thinking block (analysis mode only; ignored if mode is flow or no thinking yet).", self._cmd_show_thinking),
             "/reload-config": ("Re-read aletheia.toml without restart.", self._cmd_reload_config),
         }
 
@@ -434,4 +441,93 @@ class CommandRouter:
         return CommandResult(
             output="Reload requested. Re-read your config file at next prompt.",
             should_reload=True,
+        )
+
+    def _cmd_thinking(self, arg: str) -> CommandResult:
+        """Toggle the thinking-mode at runtime: flow / analysis / status.
+
+        Modifies config.thinking.mode in place. The change applies starting
+        with the next model call (no restart needed). Persists for this
+        session only — restart starts fresh from TOML default.
+
+        Optional second word controls collapsed rendering when switching to
+        analysis: `analysis expand` sets collapsed=False; `analysis collapse`
+        sets collapsed=True. Default on switch-to-analysis preserves current
+        collapsed setting.
+        """
+        parts = arg.strip().lower().split()
+        cur_mode = self.config.thinking.mode
+        cur_collapsed = self.config.thinking.collapsed
+
+        if not parts or parts[0] == "status":
+            collapsed_word = "collapsed-by-default" if cur_collapsed else "always-expanded"
+            return CommandResult(
+                output=(
+                    f"Thinking mode: **{cur_mode}** "
+                    f"({collapsed_word if cur_mode == 'analysis' else 'no thinking generated'}).\n"
+                    f"Switch with: /thinking flow | /thinking analysis "
+                    f"[expand|collapse]."
+                )
+            )
+
+        mode = parts[0]
+        if mode not in ("flow", "analysis"):
+            return CommandResult(
+                output=(
+                    f"Unknown thinking mode: '{mode}'. "
+                    f"Valid modes are 'flow' (no thinking, fast) and "
+                    f"'analysis' (deliberate before answering)."
+                )
+            )
+
+        self.config.thinking.mode = mode
+
+        if mode == "analysis" and len(parts) >= 2:
+            if parts[1] == "expand":
+                self.config.thinking.collapsed = False
+            elif parts[1] == "collapse":
+                self.config.thinking.collapsed = True
+            # silently ignore any other second-arg
+
+        if mode == "flow":
+            return CommandResult(
+                output=(
+                    "Switched to **flow** mode — no thinking will be generated. "
+                    "Faster responses, no scaffolding."
+                )
+            )
+        collapsed_word = "collapsed-by-default" if self.config.thinking.collapsed else "always-expanded"
+        return CommandResult(
+            output=(
+                f"Switched to **analysis** mode ({collapsed_word}) — the model will "
+                f"deliberate before responding. "
+                f"{'Use /show-thinking to expand the latest block.' if self.config.thinking.collapsed else 'Thinking will render inline after each response.'}"
+            )
+        )
+
+    def _cmd_show_thinking(self, arg: str) -> CommandResult:
+        """Expand the latest thinking block stored on this router instance.
+
+        Returns the thinking text via the `expand_thinking` field on
+        CommandResult; __main__ dispatches it to ui.show_thinking_expanded()
+        for proper Panel rendering. Clean separation from `output` (which is
+        always plain text rendered via ui.show_command_output).
+        """
+        if self.config.thinking.mode != "analysis":
+            return CommandResult(
+                output=(
+                    "Thinking-mode is 'flow' — no thinking was generated. "
+                    "Switch to analysis with /thinking analysis to enable."
+                )
+            )
+        if not self.last_thinking:
+            return CommandResult(
+                output=(
+                    "No thinking yet — say something to the partner first in "
+                    "analysis mode, then /show-thinking will display the latest."
+                )
+            )
+        return CommandResult(
+            output="",  # rendering happens via expand_thinking instead
+            expand_thinking=self.last_thinking,
         )

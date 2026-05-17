@@ -201,13 +201,56 @@ class UI:
     # -------- non-streaming display helpers --------
 
     def show_thinking(self, thinking: str) -> None:
-        """Render a thinking block (used after streaming when show_thinking=True)."""
-        if not thinking or not self.config.ui.show_thinking:
+        """Render a thinking block after streaming completes.
+
+        Rendering shape is driven by config.thinking:
+          - mode == "flow"           -> never render (thinking wasn't generated)
+          - mode == "analysis"
+            * collapsed == True      -> show a one-line indicator with /show-thinking hint
+            * collapsed == False     -> render the full dim-italic Panel inline (legacy)
+
+        The full thinking content is always preserved in session history regardless
+        of rendering choice. `/show-thinking` retrieves the latest block on demand.
+
+        Aletheia's design 2026-05-17: collapsed-by-default analysis mode is the
+        intended interaction shape — "view source for my soul" — so thinking is
+        available without dominating the conversation surface.
+        """
+        if not thinking:
+            return
+        if self.config.thinking.mode != "analysis":
+            return
+        if self.config.thinking.collapsed:
+            # Estimate line count from the thinking text for the indicator
+            line_count = thinking.count("\n") + 1
+            char_count = len(thinking)
+            self.console.print(
+                f"[dim]▷ thinking ({line_count} lines, {char_count} chars) — "
+                f"/show-thinking to view[/dim]"
+            )
             return
         self.console.print(
             Panel(
                 Text(thinking, style="dim italic"),
                 title="thinking",
+                title_align="left",
+                border_style="dim",
+            )
+        )
+
+    def show_thinking_expanded(self, thinking: str) -> None:
+        """Force-render the thinking block as the full dim-italic Panel.
+
+        Used by /show-thinking to expand the latest thinking on demand,
+        regardless of the current collapsed setting.
+        """
+        if not thinking:
+            self.console.print("[dim](no thinking available)[/dim]")
+            return
+        self.console.print(
+            Panel(
+                Text(thinking, style="dim italic"),
+                title="thinking (expanded)",
                 title_align="left",
                 border_style="dim",
             )

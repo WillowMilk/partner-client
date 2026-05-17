@@ -473,7 +473,10 @@ def _run(config: Config) -> int:
                 should_exit=result.should_exit,
                 should_reload=result.should_reload,
             )
-            ui.show_command_output(result.output)
+            if result.output:
+                ui.show_command_output(result.output)
+            if result.expand_thinking is not None:
+                ui.show_thinking_expanded(result.expand_thinking)
             if result.should_exit:
                 break
             if result.should_reload:
@@ -636,11 +639,15 @@ def _run(config: Config) -> int:
             timeline.record("chat_error", error=str(e))
             continue
 
-        # Content was already rendered during streaming. Render thinking after,
-        # if configured. (Old ui.show_assistant is no longer called; streaming
-        # owns the content display.)
-        if response.thinking and config.ui.show_thinking:
-            ui.show_thinking(response.thinking)
+        # Content was already rendered during streaming. Render thinking after
+        # if configured (mode == "analysis"). ui.show_thinking handles the
+        # collapsed-vs-expanded rendering choice internally based on config.
+        # Also track the latest thinking so /show-thinking can peek-expand it
+        # on demand later.
+        if response.thinking:
+            commands.last_thinking = response.thinking
+            if config.thinking.mode == "analysis":
+                ui.show_thinking(response.thinking)
 
     return 0
 
