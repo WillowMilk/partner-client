@@ -44,6 +44,21 @@ def execute(filename_or_match: str) -> str:
     # Direct filename match first
     if query.endswith(".md"):
         candidate = hub_path / query
+        # Defense: enforce that the candidate stays within hub_path.
+        # `query="../outside.md"` or `query="/abs/path.md"` would otherwise
+        # let the partner read arbitrary .md files via the direct branch.
+        try:
+            from partner_client.paths import verify_path_under_base, PathError
+        except ImportError:
+            return "Error: path resolver not available; client may be misconfigured."
+        try:
+            candidate = verify_path_under_base(candidate, hub_path, label="Hub root")
+        except PathError:
+            return (
+                f"Error: '{query}' is not a valid Hub letter name. "
+                f"Letters live directly under the Hub root; '..' and absolute "
+                f"paths are not permitted."
+            )
         if candidate.is_file():
             return _read_safely(candidate)
 
