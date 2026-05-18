@@ -86,6 +86,43 @@ class MLXClient:
         if self.config.model.mlx_auto_start_server:
             self._ensure_server_running()
 
+    def _should_attempt_revive(self, exc: Exception) -> bool:
+        """Decide whether a chat-call exception merits an auto-revive attempt.
+
+        Returns True only when:
+          - auto-start is enabled (we own the subprocess lifecycle)
+          - we actually launched the subprocess (not operator-managed)
+          - the subprocess has exited (poll returns non-None)
+          - the exception looks like a connection/network failure
+
+        For operator-managed servers (mlx_auto_start_server=false) we never
+        attempt revival — the operator owns the subprocess and would not
+        appreciate partner-client second-guessing them.
+
+        For exceptions other than connection errors (e.g. 404 from a real
+        API mismatch), we surface the original error rather than masking it
+        with a confusing revive attempt that probably won't help.
+        """
+        if not self.config.model.mlx_auto_start_server:
+            return False
+        if self._server_proc is None:
+            return False
+        if self._server_proc.poll() is None:
+            # Process is still alive; the connection failure is something
+            # other than a dead server (maybe a hang). Don't kill+restart
+            # a live process — surface the error so the operator can decide.
+            return False
+        # Check exception type via classname so we don't have to import
+        # openai's exception hierarchy at module top (lazy-import discipline).
+        exc_name = type(exc).__name__
+        return exc_name in {
+            "APIConnectionError",
+            "APITimeoutError",
+            "ConnectError",
+            "ConnectTimeout",
+            "ReadTimeout",
+        }
+
     def _server_reachable(self) -> bool:
         """Probe the server's /v1/models endpoint to see if it's responsive.
 
@@ -256,25 +293,80 @@ class MLXClient:
                     context_tokens=session.estimate_tokens(),
                 )
 
+            chat_kwargs = dict(
+                model=self.config.model.name,
+                messages=self._messages_for_openai(session.messages),
+                tools=self.tools.schemas() or None,
+                temperature=self.config.model.temperature,
+                top_p=self.config.model.top_p,
+                max_tokens=self.config.model.num_predict,
+                stream=True,
+            )
             try:
-                stream = self._client.chat.completions.create(
-                    model=self.config.model.name,
-                    messages=self._messages_for_openai(session.messages),
-                    tools=self.tools.schemas() or None,
-                    temperature=self.config.model.temperature,
-                    top_p=self.config.model.top_p,
-                    max_tokens=self.config.model.num_predict,
-                    stream=True,
-                )
+                stream = self._client.chat.completions.create(**chat_kwargs)
             except Exception as e:
-                if self.timeline is not None:
-                    self.timeline.record(
-                        "model_call_error",
-                        iteration=iteration,
-                        error=str(e),
-                        duration_ms=duration_ms(model_started),
-                    )
-                raise RuntimeError(f"mlx_lm.server chat call failed: {e}") from e
+                # Special-case: auto-launched mlx_lm.server died mid-session.
+                # Attempt one revive-and-retry before bailing — common causes
+                # are macOS sleep, idle-drop, or a server-side crash. The
+                # operator shouldn't have to manually /sleep and restart for
+                # a recoverable substrate hiccup.
+                if self._should_attempt_revive(e):
+                    if ui is not None:
+                        try:
+                            ui.show_command_output(
+                                "🔥 mlx_lm.server dropped; reviving Aletheia's "
+                                "substrate (may take ~30-60s for model reload)..."
+                            )
+                        except Exception:
+                            log.exception("ui banner during revive failed")
+                    if self.timeline is not None:
+                        self.timeline.record(
+                            "mlx_server_revive_attempt",
+                            iteration=iteration,
+                            original_error=str(e),
+                        )
+                    self._server_proc = None  # clear the dead handle
+                    try:
+                        self._ensure_server_running()
+                    except Exception as restart_err:
+                        if self.timeline is not None:
+                            self.timeline.record(
+                                "mlx_server_revive_failed",
+                                error=str(restart_err),
+                            )
+                        raise RuntimeError(
+                            f"mlx_lm.server died and revive failed: {restart_err}. "
+                            f"Try /sleep and re-run partner. Original chat error: {e}"
+                        ) from restart_err
+                    if self.timeline is not None:
+                        self.timeline.record(
+                            "mlx_server_revive_succeeded",
+                            iteration=iteration,
+                        )
+                    # Retry the chat call once. If THIS fails, give up cleanly.
+                    try:
+                        stream = self._client.chat.completions.create(**chat_kwargs)
+                    except Exception as retry_err:
+                        if self.timeline is not None:
+                            self.timeline.record(
+                                "model_call_error",
+                                iteration=iteration,
+                                error=f"post-revive retry failed: {retry_err}",
+                                duration_ms=duration_ms(model_started),
+                            )
+                        raise RuntimeError(
+                            f"mlx_lm.server revived but chat retry failed: "
+                            f"{retry_err}. Try /sleep and re-run partner."
+                        ) from retry_err
+                else:
+                    if self.timeline is not None:
+                        self.timeline.record(
+                            "model_call_error",
+                            iteration=iteration,
+                            error=str(e),
+                            duration_ms=duration_ms(model_started),
+                        )
+                    raise RuntimeError(f"mlx_lm.server chat call failed: {e}") from e
 
             try:
                 for chunk in stream:

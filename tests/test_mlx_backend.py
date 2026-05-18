@@ -499,6 +499,149 @@ def test_mlx_client_normalize_tool_call_fills_missing_fields() -> None:
     assert json.loads(out["function"]["arguments"]) == {"a": 1}
 
 
+# ---------- Auto-revive on dropped mlx_lm.server ----------
+
+
+def _fake_connection_error():
+    """Build a fake exception whose classname matches APIConnectionError."""
+    class APIConnectionError(Exception):
+        pass
+    return APIConnectionError("Connection refused")
+
+
+def test_should_attempt_revive_when_subprocess_died_and_autostart_on() -> None:
+    """Server we launched died + connection error => revive."""
+    client, _ = _make_mlx_client_with_mock_openai()
+    client.config.model.mlx_auto_start_server = True
+    fake_proc = MagicMock()
+    fake_proc.poll.return_value = 1  # non-None means process exited
+    client._server_proc = fake_proc
+    assert client._should_attempt_revive(_fake_connection_error()) is True
+
+
+def test_should_NOT_attempt_revive_when_autostart_off() -> None:
+    """Operator-managed server: never auto-restart (their lifecycle to manage)."""
+    client, _ = _make_mlx_client_with_mock_openai()
+    client.config.model.mlx_auto_start_server = False
+    fake_proc = MagicMock()
+    fake_proc.poll.return_value = 1
+    client._server_proc = fake_proc
+    assert client._should_attempt_revive(_fake_connection_error()) is False
+
+
+def test_should_NOT_attempt_revive_when_no_subprocess() -> None:
+    """No subprocess to revive (operator-managed externally)."""
+    client, _ = _make_mlx_client_with_mock_openai()
+    client.config.model.mlx_auto_start_server = True
+    client._server_proc = None
+    assert client._should_attempt_revive(_fake_connection_error()) is False
+
+
+def test_should_NOT_attempt_revive_when_subprocess_still_alive() -> None:
+    """Process alive but connection refused — don't kill a live process."""
+    client, _ = _make_mlx_client_with_mock_openai()
+    client.config.model.mlx_auto_start_server = True
+    fake_proc = MagicMock()
+    fake_proc.poll.return_value = None  # still alive
+    client._server_proc = fake_proc
+    assert client._should_attempt_revive(_fake_connection_error()) is False
+
+
+def test_should_NOT_attempt_revive_for_unrelated_exception() -> None:
+    """404, value errors, etc. — surface, don't try to revive."""
+    client, _ = _make_mlx_client_with_mock_openai()
+    client.config.model.mlx_auto_start_server = True
+    fake_proc = MagicMock()
+    fake_proc.poll.return_value = 1
+    client._server_proc = fake_proc
+    assert client._should_attempt_revive(ValueError("bad input")) is False
+
+
+def test_should_attempt_revive_recognizes_timeout_exceptions() -> None:
+    """ReadTimeout / ConnectTimeout also trigger revive when subprocess died."""
+    client, _ = _make_mlx_client_with_mock_openai()
+    client.config.model.mlx_auto_start_server = True
+    fake_proc = MagicMock()
+    fake_proc.poll.return_value = 1
+    client._server_proc = fake_proc
+
+    class ReadTimeout(Exception):
+        pass
+    class APITimeoutError(Exception):
+        pass
+
+    assert client._should_attempt_revive(ReadTimeout("timeout")) is True
+    assert client._should_attempt_revive(APITimeoutError("timeout")) is True
+
+
+def test_chat_revives_dropped_server_and_retries_successfully(monkeypatch) -> None:
+    """Full integration: first chat call raises ConnectError; server.poll() returns 1;
+    _ensure_server_running is called; retry returns a real stream; chat returns
+    the final ChatResponse normally."""
+    client, mock_openai_instance = _make_mlx_client_with_mock_openai()
+    client.config.model.mlx_auto_start_server = True
+
+    # Set up a fake dead subprocess
+    fake_proc = MagicMock()
+    fake_proc.poll.return_value = 1
+    client._server_proc = fake_proc
+
+    # Mock _ensure_server_running so we don't actually launch anything
+    ensure_called = []
+    def fake_ensure():
+        ensure_called.append(True)
+    monkeypatch.setattr(client, "_ensure_server_running", fake_ensure)
+
+    # First chat call raises, second succeeds with a normal stream
+    class APIConnectionError(Exception):
+        pass
+    chunks = [
+        _make_delta_chunk(content="recovered."),
+        _make_delta_chunk(finish_reason="stop"),
+    ]
+    mock_openai_instance.chat.completions.create.side_effect = [
+        APIConnectionError("Connection refused"),
+        iter(chunks),
+    ]
+
+    session = MagicMock()
+    session.messages = []
+    session.estimate_tokens.return_value = 0
+    ui = MagicMock()
+
+    response = client.chat(session=session, ui=ui)
+    assert response.content == "recovered."
+    assert len(ensure_called) == 1, "ensure_server_running should have been called once"
+    # UI should have received a revive banner
+    ui.show_command_output.assert_called()
+    banner_text = ui.show_command_output.call_args[0][0]
+    assert "reviving" in banner_text.lower() or "dropped" in banner_text.lower()
+
+
+def test_chat_surfaces_clean_error_when_revive_fails(monkeypatch) -> None:
+    """When _ensure_server_running fails during revive, we get a helpful error."""
+    client, mock_openai_instance = _make_mlx_client_with_mock_openai()
+    client.config.model.mlx_auto_start_server = True
+    fake_proc = MagicMock()
+    fake_proc.poll.return_value = 1
+    client._server_proc = fake_proc
+
+    def fake_ensure_fails():
+        raise RuntimeError("model not in cache")
+    monkeypatch.setattr(client, "_ensure_server_running", fake_ensure_fails)
+
+    class APIConnectionError(Exception):
+        pass
+    mock_openai_instance.chat.completions.create.side_effect = APIConnectionError("nope")
+
+    session = MagicMock()
+    session.messages = []
+    session.estimate_tokens.return_value = 0
+
+    with pytest.raises(RuntimeError, match="revive failed"):
+        client.chat(session=session, ui=None)
+
+
 # ---------- Doctor mlx-lm checks ----------
 
 
