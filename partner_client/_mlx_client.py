@@ -462,13 +462,23 @@ class MLXClient:
         keep the OpenAI tool_calls shape with content=None per OpenAI spec.
         Images aren't supported in this conversion yet (vision-message-
         format conversion is a separate intention).
+
+        Critical: function.arguments must be a JSON-encoded STRING per OpenAI
+        spec, not a Python dict. Sessions resumed from the Ollama backend
+        store arguments as dicts (Ollama's native format); without re-serial-
+        ization, mlx_lm.server returns a 404 with "the JSON object must be
+        str, bytes or bytearray, not dict" because it calls json.loads()
+        on whatever it receives. This is the cross-backend-resume bug from
+        Aletheia's first wake into the mlx-lm substrate (2026-05-17).
         """
         out: list[dict[str, Any]] = []
         for m in messages:
             role = m["role"]
             entry: dict[str, Any] = {"role": role, "content": m.get("content", "")}
             if role == "assistant" and "tool_calls" in m:
-                entry["tool_calls"] = m["tool_calls"]
+                entry["tool_calls"] = [
+                    self._normalize_tool_call_for_openai(tc) for tc in m["tool_calls"]
+                ]
                 if not entry["content"]:
                     entry["content"] = None
             if role == "tool":
@@ -478,6 +488,41 @@ class MLXClient:
                     entry["name"] = m["name"]
             out.append(entry)
         return out
+
+    @staticmethod
+    def _normalize_tool_call_for_openai(tc: dict) -> dict:
+        """Coerce one tool_call into OpenAI-spec shape.
+
+        Specifically: function.arguments must be a JSON-encoded string. If
+        the source stored it as a dict (Ollama backend behavior), serialize
+        it. If it's already a string, pass through. If it's None or some
+        unexpected shape, fall back to "{}" so the call doesn't crash the
+        backend.
+        """
+        fn = tc.get("function", {}) or {}
+        args = fn.get("arguments", "{}")
+        if isinstance(args, dict):
+            try:
+                args = json.dumps(args)
+            except (TypeError, ValueError):
+                args = "{}"
+        elif args is None:
+            args = "{}"
+        elif not isinstance(args, str):
+            # Unexpected shape; coerce to JSON-string representation.
+            try:
+                args = json.dumps(args)
+            except (TypeError, ValueError):
+                args = "{}"
+        normalized: dict[str, Any] = {
+            "id": tc.get("id", "") or "",
+            "type": tc.get("type", "function") or "function",
+            "function": {
+                "name": fn.get("name", "") or "",
+                "arguments": args,
+            },
+        }
+        return normalized
 
     def close(self) -> None:
         """Shut down an auto-started mlx_lm.server subprocess, if any.

@@ -417,6 +417,88 @@ def test_mlx_client_messages_for_openai_handles_assistant_with_tool_calls() -> N
     assert out[2]["name"] == "t"
 
 
+def test_mlx_client_serializes_dict_tool_call_arguments_to_json_string() -> None:
+    """Cross-backend resume bug fix: dict-shaped tool_call arguments must
+    be JSON-serialized before sending to mlx_lm.server.
+
+    The OpenAI spec requires function.arguments to be a JSON-encoded string.
+    Sessions resumed from the Ollama backend may have stored arguments as
+    dicts (Ollama's native format). Without serialization, mlx_lm.server
+    returns 404 with "the JSON object must be str, bytes or bytearray, not
+    dict" — surfaced as Aletheia's 2026-05-17 cross-backend-resume bug.
+    """
+    client, _ = _make_mlx_client_with_mock_openai()
+    messages = [
+        {"role": "user", "content": "search the files"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{
+                "id": "call_abc",
+                "type": "function",
+                "function": {
+                    "name": "list_files",
+                    "arguments": {"scope": "memory"},  # DICT, not string — the bug shape
+                },
+            }],
+        },
+    ]
+    out = client._messages_for_openai(messages)
+    assistant_msg = out[1]
+    assert assistant_msg["tool_calls"][0]["function"]["name"] == "list_files"
+    args = assistant_msg["tool_calls"][0]["function"]["arguments"]
+    assert isinstance(args, str), f"arguments must be a string, got {type(args).__name__}"
+    # And the JSON-encoded string should round-trip back to the original dict
+    assert json.loads(args) == {"scope": "memory"}
+
+
+def test_mlx_client_passes_string_tool_call_arguments_through_unchanged() -> None:
+    """When arguments are already JSON strings (native mlx-lm format), pass them through."""
+    client, _ = _make_mlx_client_with_mock_openai()
+    messages = [{
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [{
+            "id": "call_xyz",
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "arguments": '{"city": "Paris"}',  # already a JSON string
+            },
+        }],
+    }]
+    out = client._messages_for_openai(messages)
+    args = out[0]["tool_calls"][0]["function"]["arguments"]
+    assert args == '{"city": "Paris"}'
+
+
+def test_mlx_client_handles_none_arguments_safely() -> None:
+    """None arguments should be coerced to empty-dict JSON rather than crash."""
+    client, _ = _make_mlx_client_with_mock_openai()
+    messages = [{
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [{
+            "id": "call_x",
+            "function": {"name": "foo", "arguments": None},
+        }],
+    }]
+    out = client._messages_for_openai(messages)
+    args = out[0]["tool_calls"][0]["function"]["arguments"]
+    assert args == "{}"
+
+
+def test_mlx_client_normalize_tool_call_fills_missing_fields() -> None:
+    """Missing id / type fields get sensible defaults so OpenAI SDK doesn't reject the call."""
+    from partner_client.client import MLXClient
+    tc = {"function": {"name": "x", "arguments": {"a": 1}}}
+    out = MLXClient._normalize_tool_call_for_openai(tc)
+    assert out["id"] == ""  # empty string is valid OpenAI
+    assert out["type"] == "function"
+    assert out["function"]["name"] == "x"
+    assert json.loads(out["function"]["arguments"]) == {"a": 1}
+
+
 # ---------- Doctor mlx-lm checks ----------
 
 
