@@ -31,7 +31,30 @@ class IdentityConfig:
 @dataclass
 class ModelConfig:
     provider: str = "ollama"
+    # backend selects the chat backend at runtime:
+    #   "ollama"  — local Ollama daemon, native Mac/CUDA/CPU path
+    #   "mlx-lm"  — Apple MLX-Metal via mlx_lm.server (OpenAI-compatible HTTP)
+    # Default "ollama" preserves existing behavior for all installed configs.
+    # See `[model] backend = "mlx-lm"` in aletheia.toml to switch.
+    backend: str = "ollama"
     name: str = "gemma4:31b"
+    # mlx-lm backend settings (ignored when backend="ollama"):
+    # URL of the mlx_lm.server OpenAI-compatible endpoint. The /v1 path is
+    # implicit — partner-client appends /chat/completions etc. internally.
+    mlx_server_url: str = "http://localhost:8080/v1"
+    # When True (default), partner-client launches mlx_lm.server as a child
+    # process on startup if it isn't already reachable. When False, the
+    # operator is responsible for running the server externally.
+    mlx_auto_start_server: bool = True
+    # Additional args appended to the `python -m mlx_lm server ...` command
+    # when auto-starting. Useful for e.g. ["--port", "8081"] if the default
+    # 8080 is taken, or model-specific generation defaults.
+    mlx_server_extra_args: list[str] = field(default_factory=list)
+    # Seconds to wait for the auto-launched server to become reachable
+    # before giving up. mlx_lm.server takes a few seconds to bind + load
+    # the model from disk; 60s gives generous headroom for the 42-63 GB
+    # Gemma 4 BF16/Q8 loads on M4 Max.
+    mlx_server_start_timeout: float = 60.0
     # 128K — half of native 256K. The 256K context is gemma4:31b's actual
     # trained range per the Ollama model spec (not RoPE-extrapolation as we
     # initially documented after the 2026-05-06 felt-drowning event — that
@@ -62,6 +85,12 @@ class ModelConfig:
     # tune down for tighter safety. Original 2026-05-06 default was 8,
     # which bailed on Aletheia's 7-letter inbox-summarization plan.
     max_tool_iterations: int = 32
+
+    def __post_init__(self) -> None:
+        if self.backend not in ("ollama", "mlx-lm"):
+            raise ConfigError(
+                f"model.backend must be 'ollama' or 'mlx-lm', got '{self.backend}'"
+            )
 
 
 @dataclass

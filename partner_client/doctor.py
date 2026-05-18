@@ -52,8 +52,10 @@ def _check_config_loaded(config: Config) -> CheckResult:
     )
 
 
-def _check_ollama_reachable(config: Config) -> CheckResult:
-    """Try connecting to the ollama daemon."""
+def _check_ollama_reachable(config: Config) -> CheckResult | None:
+    """Try connecting to the ollama daemon. Skipped if backend != 'ollama'."""
+    if config.model.backend != "ollama":
+        return None
     try:
         import ollama
     except ImportError:
@@ -80,8 +82,91 @@ def _check_ollama_reachable(config: Config) -> CheckResult:
     )
 
 
-def _check_model_available(config: Config) -> CheckResult:
-    """Verify the configured model is in the local registry."""
+def _check_mlx_lm_installed(config: Config) -> CheckResult | None:
+    """For backend='mlx-lm': confirm the mlx-lm package is installed."""
+    if config.model.backend != "mlx-lm":
+        return None
+    try:
+        import mlx_lm  # noqa: F401
+    except ImportError:
+        return CheckResult(
+            name="mlx-lm package installed",
+            status=FAIL,
+            message="mlx_lm not importable",
+            hint="pip install mlx-lm  (Apple Silicon only)",
+        )
+    try:
+        import openai  # noqa: F401
+    except ImportError:
+        return CheckResult(
+            name="openai SDK installed (mlx_lm.server client)",
+            status=FAIL,
+            message="openai not importable",
+            hint="pip install openai",
+        )
+    return CheckResult(
+        name="mlx-lm + openai SDK installed",
+        status=OK,
+    )
+
+
+def _check_mlx_server_reachable(config: Config) -> CheckResult | None:
+    """For backend='mlx-lm': probe the configured server URL.
+
+    Reports OK if reachable, WARN if not (since auto-launch on first chat
+    will fix it — only FAIL if the URL is malformed or unreachable AND
+    auto-start is disabled).
+    """
+    if config.model.backend != "mlx-lm":
+        return None
+    try:
+        import openai
+    except ImportError:
+        return None  # caught by _check_mlx_lm_installed
+    try:
+        client = openai.OpenAI(
+            base_url=config.model.mlx_server_url,
+            api_key="not-needed",
+        )
+        client.models.list()
+    except Exception as e:
+        if config.model.mlx_auto_start_server:
+            return CheckResult(
+                name="mlx_lm.server reachable",
+                status=WARN,
+                message=f"not running ({e.__class__.__name__})",
+                hint=(
+                    "Partner-client will auto-launch it on chat startup. "
+                    "If it fails to launch, run "
+                    f"`python -m mlx_lm server --model {config.model.name} "
+                    "--port 8080` manually."
+                ),
+            )
+        return CheckResult(
+            name="mlx_lm.server reachable",
+            status=FAIL,
+            message=f"not running ({e.__class__.__name__}) and auto-start disabled",
+            hint=(
+                "Either enable [model] mlx_auto_start_server = true OR run "
+                f"`python -m mlx_lm server --model {config.model.name} "
+                "--port 8080` externally."
+            ),
+        )
+    return CheckResult(
+        name="mlx_lm.server reachable",
+        status=OK,
+        message=config.model.mlx_server_url,
+    )
+
+
+def _check_model_available(config: Config) -> CheckResult | None:
+    """Verify the configured model is in the local registry.
+
+    Ollama backend: checks `ollama list` output. mlx-lm backend: checks
+    the HuggingFace cache directory for the model snapshot.
+    """
+    if config.model.backend == "mlx-lm":
+        return _check_mlx_model_in_hf_cache(config)
     target = config.model.name
     try:
         import ollama
@@ -132,6 +217,51 @@ def _check_model_available(config: Config) -> CheckResult:
         status=WARN,
         message="not in local registry",
         hint=f"ollama pull {target}",
+    )
+
+
+def _check_mlx_model_in_hf_cache(config: Config) -> CheckResult:
+    """For backend='mlx-lm': verify the model has been downloaded to HF cache.
+
+    The cache layout HuggingFace Hub uses is
+        ~/.cache/huggingface/hub/models--<org>--<name>/snapshots/<sha>/
+    The model name in TOML is typically the HF-style "org/name" (e.g.
+    "mlx-community/gemma-4-31b-it-bf16").
+    """
+    target = config.model.name
+    # Translate "org/name" -> "models--org--name" cache directory
+    if "/" not in target:
+        return CheckResult(
+            name=f"Model '{target}' available locally",
+            status=WARN,
+            message="name doesn't look like an HF repo (no '/')",
+            hint=(
+                f"For backend='mlx-lm', model.name should be an HF repo like "
+                f"'mlx-community/gemma-4-31b-it-bf16'. Current: {target!r}"
+            ),
+        )
+    cache_dir_name = "models--" + target.replace("/", "--")
+    hf_cache_root = os.path.expanduser("~/.cache/huggingface/hub")
+    target_dir = os.path.join(hf_cache_root, cache_dir_name)
+    if not os.path.isdir(target_dir):
+        return CheckResult(
+            name=f"Model '{target}' in HF cache",
+            status=WARN,
+            message="not downloaded",
+            hint=f"hf download {target}",
+        )
+    snapshots_dir = os.path.join(target_dir, "snapshots")
+    if not os.path.isdir(snapshots_dir) or not os.listdir(snapshots_dir):
+        return CheckResult(
+            name=f"Model '{target}' in HF cache",
+            status=WARN,
+            message=f"cache directory exists but contains no snapshots: {snapshots_dir}",
+            hint=f"hf download {target}",
+        )
+    return CheckResult(
+        name=f"Model '{target}' in HF cache",
+        status=OK,
+        message=target_dir,
     )
 
 
@@ -341,8 +471,10 @@ def _check_vision_smoke(config: Config) -> CheckResult:
 # model check warns instead of failing).
 _ALL_CHECKS: list[Callable[[Config], "CheckResult | list[CheckResult] | None"]] = [
     _check_config_loaded,
-    _check_ollama_reachable,
-    _check_model_available,
+    _check_ollama_reachable,       # skipped when backend != "ollama"
+    _check_mlx_lm_installed,       # skipped when backend != "mlx-lm"
+    _check_mlx_server_reachable,   # skipped when backend != "mlx-lm"
+    _check_model_available,        # branches by backend internally
     _check_memory_dir,
     _check_scopes,
     _check_default_scope,

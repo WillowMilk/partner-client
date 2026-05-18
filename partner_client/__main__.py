@@ -15,7 +15,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from .client import OllamaClient, setup_scope_env
+from .client import OllamaClient, make_chat_client, setup_scope_env
 from .commands import CommandRouter
 from .config import Config, ConfigError, load_config
 from .directives import parse_input
@@ -295,7 +295,7 @@ def _run(config: Config) -> int:
         context_tokens=session.estimate_tokens(),
     )
     plan_store = PlanStore(config)
-    client = OllamaClient(config, tools, timeline=timeline)
+    client = make_chat_client(config, tools, timeline=timeline)
     commands = CommandRouter(config, session, tools)
 
     def on_plan_approval_request(summary: str, plan: list[str]) -> tuple[bool, str | None]:
@@ -487,7 +487,14 @@ def _run(config: Config) -> int:
                     tools.discover()
                     timeline = RunTimeline(config, session)
                     plan_store = PlanStore(config)
-                    client = OllamaClient(config, tools, timeline=timeline)
+                    # Old client may have an auto-started mlx_lm.server child;
+                    # close it cleanly before binding a fresh one.
+                    if hasattr(client, "close"):
+                        try:
+                            client.close()
+                        except Exception:
+                            logging.exception("client.close() failed during reload")
+                    client = make_chat_client(config, tools, timeline=timeline)
                     # Rebind session to the new config + memory so checkpoint/sleep
                     # write to the new locations rather than the stale ones.
                     session.config = config
@@ -648,6 +655,15 @@ def _run(config: Config) -> int:
             commands.last_thinking = response.thinking
             if config.thinking.mode == "analysis":
                 ui.show_thinking(response.thinking)
+
+    # Clean shutdown: MLX backend may have an auto-started mlx_lm.server
+    # child process that needs terminating. Idempotent and harmless for
+    # Ollama backend (which has no close()).
+    if hasattr(client, "close"):
+        try:
+            client.close()
+        except Exception:
+            logging.exception("client.close() failed during shutdown")
 
     return 0
 

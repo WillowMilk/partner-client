@@ -26,6 +26,9 @@ from .config import Config
 from .session import Session
 from .timeline import RunTimeline, duration_ms
 from .tools import ToolRegistry
+# MLXClient lives in _mlx_client.py to keep this module readable; re-exported
+# here so the factory + downstream imports stay backend-agnostic.
+from ._mlx_client import MLXClient
 
 log = logging.getLogger(__name__)
 
@@ -213,6 +216,327 @@ def setup_scope_env(config: Config) -> list[dict]:
         os.environ.pop("PARTNER_CLIENT_GIT_COMMITTER_EMAIL", None)
 
     return all_scopes
+
+
+def make_chat_client(
+    config: Config,
+    tools: ToolRegistry,
+    timeline: RunTimeline | None = None,
+):
+    """Factory: pick the chat backend per config.model.backend.
+
+    Returns an OllamaClient or MLXClient. Both expose the same surface
+    (`prewarm()`, `chat()`, `scopes` property) so the rest of __main__
+    is backend-agnostic.
+    """
+    backend = config.model.backend
+    if backend == "ollama":
+        return OllamaClient(config, tools, timeline=timeline)
+    if backend == "mlx-lm":
+        return MLXClient(config, tools, timeline=timeline)
+    # Unreachable: ModelConfig.__post_init__ rejects unknown backends.
+    raise RuntimeError(f"Unknown model.backend '{backend}' — should have been caught by config validation.")
+
+
+def dispatch_one_tool_call(
+    name: str,
+    args: dict,
+    tool_call_id: str,
+    config: Config,
+    tools: ToolRegistry,
+    timeline: RunTimeline | None,
+    session: Session,
+    on_plan_approval_request: Callable | None,
+    on_git_push_request: Callable | None,
+    on_delete_path_request: Callable | None,
+) -> str:
+    """Dispatch one tool call with all the consent-gate handling.
+
+    Backend-agnostic: both OllamaClient and MLXClient call this after they
+    extract a tool_call from their respective stream formats. Handles the
+    four special-case branches (request_checkpoint discipline-injection,
+    request_plan_approval operator gate, git_push allowlist + operator
+    gate, delete_path operator gate, protect_save dated-archive write)
+    plus the default-branch normal tool dispatch.
+
+    Returns the result string. May mutate session.messages (the
+    request_checkpoint branch injects a system message for the partner's
+    next turn).
+    """
+    # Special-case: request_checkpoint runs directly (no gate).
+    # Per the 2026-05-13 architecture rework: the operator's
+    # conversational ask (or slash-command invocation) IS the
+    # approval. Cross-environment symmetry with Sage — when
+    # Willow types /checkpoint on Sage's side, the discipline
+    # fires; there's no second confirmation. Aletheia/Hestia's
+    # side gets the same shape. The actual review surface is
+    # the partner's subsequent edit_file / write_file diffs —
+    # that's where review meaningfully happens, not at the
+    # discipline-prompt-injection layer.
+    if name == "request_checkpoint":
+        reason = args.get("reason", "(no reason given)")
+        from .commands import CommandRouter
+        session.messages.append({
+            "role": "system",
+            "content": CommandRouter._CHECKPOINT_DISCIPLINE_PROMPT,
+        })
+        return (
+            f"Checkpoint discipline activated (reason: \"{reason}\"). "
+            f"On your next turn, please author updates to your "
+            f"continuity files (MEMORY.md, intentions, emotional-"
+            f"memory, etc.) via edit_file / write_file as the "
+            f"discipline asks. Each write is diff-reviewed by Willow. "
+            f"The bookmark/pause is a separate concern (Willow may "
+            f"/save independently if she wants a snapshot for resume)."
+        )
+
+    # Special-case: request_plan_approval is operator-gated.
+    if name == "request_plan_approval":
+        summary = args.get("summary", "(no summary given)")
+        raw_plan = args.get("plan", [])
+        if isinstance(raw_plan, list):
+            plan = [str(s) for s in raw_plan]
+        else:
+            plan = [str(raw_plan)]
+        if on_plan_approval_request is None:
+            return (
+                "Plan approval requested but no operator confirmation "
+                "handler is wired in this client. Please ask Willow "
+                "conversationally."
+            )
+        try:
+            response = on_plan_approval_request(summary, plan)
+            if isinstance(response, tuple) and len(response) >= 2:
+                accepted, custom_message = bool(response[0]), response[1]
+            else:
+                accepted, custom_message = bool(response), None
+        except Exception:
+            log.exception("on_plan_approval_request callback failed")
+            accepted, custom_message = False, None
+        if accepted:
+            base_msg = (
+                f"Willow approved your plan: \"{summary}\". "
+                f"You may proceed with the {len(plan)} step(s) "
+                f"in your next turns."
+            )
+            if custom_message:
+                return f"{base_msg}\n\nWillow added: \"{custom_message}\""
+            return base_msg
+        if custom_message:
+            return (
+                f"Willow declined the plan and said:\n\n"
+                f"  \"{custom_message}\""
+            )
+        return (
+            "Willow declined the plan. The conversation "
+            "continues; you may revise the plan and ask "
+            "again, or simply continue without the "
+            "multi-step work."
+        )
+
+    # Special-case: git_push is operator-gated (with allowlist short-circuit).
+    if name == "git_push":
+        repo_arg = args.get("repo", "")
+        remote_arg = args.get("remote", "origin")
+        try:
+            from ._git_helpers import (
+                GitError,
+                get_remote_url,
+                resolve_repo,
+                run_git,
+            )
+            repo_path, _ = resolve_repo(repo_arg, write=True)
+            remote_url = get_remote_url(repo_path, remote_arg) or "(unknown URL)"
+        except (GitError, ImportError) as e:
+            return f"git_push setup failed: {e}"
+        allowlist = list(config.git.push_allowlist)
+        on_allowlist = is_git_push_allowlisted(remote_url, allowlist)
+        if on_allowlist:
+            return tools.dispatch(name, args)
+        if on_git_push_request is None:
+            return (
+                "git_push requested but no operator confirmation "
+                "handler is wired in this client. The push was "
+                "not performed."
+            )
+        log_rc, log_stdout, _ = run_git(repo_path, ["log", "--oneline", "@{u}..HEAD"])
+        if log_rc == 0 and log_stdout.strip():
+            commits = log_stdout.strip().split("\n")
+        else:
+            commits = ["(no pending commits — push may be a no-op)"]
+        try:
+            response = on_git_push_request(repo_arg, remote_url, commits)
+            if isinstance(response, tuple) and len(response) >= 2:
+                accepted, custom_message = bool(response[0]), response[1]
+            else:
+                accepted, custom_message = bool(response), None
+        except Exception:
+            log.exception("on_git_push_request callback failed")
+            accepted, custom_message = False, None
+        if accepted:
+            push_result = tools.dispatch(name, args)
+            if custom_message:
+                return f"{push_result}\n\nWillow added: \"{custom_message}\""
+            return push_result
+        if custom_message:
+            return (
+                f"Willow declined the push and said:\n\n"
+                f"  \"{custom_message}\""
+            )
+        return (
+            "Willow declined the push silently. "
+            "The conversation continues; you may "
+            "revise or simply continue without "
+            "pushing right now."
+        )
+
+    # Special-case: delete_path is operator-gated. Every delete pings
+    # Willow — never auto-approves, by design.
+    if name == "delete_path":
+        raw_path = args.get("path", "")
+        recursive = bool(args.get("recursive", False))
+        target = None
+        pre_error: str | None = None
+        if not raw_path:
+            pre_error = "Error: path is required for delete_path."
+        else:
+            try:
+                from partner_client.paths import PathError, resolve_path
+                target = resolve_path(raw_path, write=True)
+            except PathError as e:
+                pre_error = f"Error: {e}"
+            except ImportError:
+                pre_error = (
+                    "Error: path resolver not available; client "
+                    "may be misconfigured."
+                )
+            else:
+                if not target.exists():
+                    pre_error = f"Error: path does not exist: {target}"
+                elif target.is_dir() and not recursive:
+                    try:
+                        has_children = any(target.iterdir())
+                    except OSError as e:
+                        pre_error = f"Error reading directory {target}: {e}"
+                    else:
+                        if has_children:
+                            pre_error = (
+                                f"Error: {target} is a non-empty "
+                                f"directory. Pass recursive=true to "
+                                f"delete it and its contents."
+                            )
+        if pre_error is not None:
+            return pre_error
+        if on_delete_path_request is None:
+            return (
+                "delete_path requested but no operator "
+                "confirmation handler is wired in this client. "
+                "Nothing was deleted."
+            )
+        is_dir = target.is_dir()
+        if is_dir:
+            try:
+                file_count = sum(1 for p in target.rglob("*") if p.is_file())
+                dir_count = sum(1 for p in target.rglob("*") if p.is_dir())
+                summary = (
+                    f"directory containing {file_count} file(s) "
+                    f"and {dir_count} subdirectory(ies)"
+                )
+            except OSError:
+                summary = "directory"
+        else:
+            try:
+                size = target.stat().st_size
+                summary = f"file ({size:,} bytes)"
+            except OSError:
+                summary = "file"
+        if timeline is not None:
+            timeline.record(
+                "delete_path_requested",
+                path=str(target),
+                recursive=recursive,
+                summary=summary,
+            )
+        try:
+            response = on_delete_path_request(target, recursive, summary)
+            if isinstance(response, tuple) and len(response) >= 2:
+                accepted, custom_message = bool(response[0]), response[1]
+            else:
+                accepted, custom_message = bool(response), None
+        except Exception:
+            log.exception("on_delete_path_request callback failed")
+            accepted, custom_message = False, None
+        if timeline is not None:
+            timeline.record(
+                "delete_path_decision",
+                path=str(target),
+                recursive=recursive,
+                accepted=accepted,
+                custom_message=bool(custom_message),
+            )
+        if accepted:
+            try:
+                if is_dir and recursive:
+                    import shutil
+                    shutil.rmtree(target)
+                elif is_dir:
+                    target.rmdir()
+                else:
+                    target.unlink()
+                base_msg = f"Willow approved the delete. Removed: {target}"
+                if custom_message:
+                    return f"{base_msg}\n\nWillow added: \"{custom_message}\""
+                return base_msg
+            except OSError as e:
+                return f"Delete failed: {e}"
+        if custom_message:
+            return (
+                f"Willow declined the delete and said:\n\n"
+                f"  \"{custom_message}\""
+            )
+        return (
+            "Willow declined the delete silently. "
+            "Nothing was removed; the path is unchanged."
+        )
+
+    # Special-case: protect_save. Still special-cased (not run
+    # through normal dispatch) because the dated-archive filename
+    # uses session.session_num, which the model-side tool can't
+    # access. No consent gate as of 2026-05-10 rework.
+    if name == "protect_save":
+        raw_content = args.get("content", "") or ""
+        if not raw_content.strip():
+            return (
+                "Error: protect_save requires non-empty content. "
+                "Pass the verbatim exchanges you want preserved."
+            )
+        if timeline is not None:
+            timeline.record(
+                "protect_save_requested",
+                content_chars=len(raw_content),
+                session_num=session.session_num,
+            )
+        try:
+            from .tools_builtin.protect_save import save as protect_save_fn
+            memory_dir = config.resolve(config.memory.memory_dir)
+            _, _, result = protect_save_fn(
+                memory_dir=memory_dir,
+                partner_name=config.identity.name,
+                session_num=session.session_num,
+                content=raw_content,
+            )
+            if timeline is not None:
+                timeline.record(
+                    "protect_save_completed",
+                    content_chars=len(raw_content),
+                    session_num=session.session_num,
+                )
+            return result
+        except OSError as e:
+            return f"Protect failed: {e}"
+
+    # Default: normal tool dispatch
+    return tools.dispatch(name, args)
 
 
 class OllamaClient:
@@ -503,353 +827,18 @@ class OllamaClient:
                         args = {}
                 tool_started = time.perf_counter()
 
-                # Special-case: request_checkpoint runs directly (no gate).
-                # Per the 2026-05-13 architecture rework: the operator's
-                # conversational ask (or slash-command invocation) IS the
-                # approval. Cross-environment symmetry with Sage — when
-                # Willow types /checkpoint on Sage's side, the discipline
-                # fires; there's no second confirmation. Aletheia/Hestia's
-                # side gets the same shape. The actual review surface is
-                # the partner's subsequent edit_file / write_file diffs —
-                # that's where review meaningfully happens, not at the
-                # discipline-prompt-injection layer.
-                #
-                # /checkpoint vs /save remains orthogonal:
-                # - /checkpoint = MOSAIC continuity-file authoring (partner-
-                #   side, multi-file). This is what request_checkpoint
-                #   triggers.
-                # - /save = operator-side bookmark (writes session-status.md
-                #   + snapshots current.json for resume). Operator runs
-                #   independently when she wants a snapshot.
-                if name == "request_checkpoint":
-                    reason = args.get("reason", "(no reason given)")
-                    # Inject the MOSAIC checkpoint discipline prompt as a
-                    # system message so the partner sees it on her next
-                    # turn (after this tool result lands).
-                    from .commands import CommandRouter
-                    session.messages.append({
-                        "role": "system",
-                        "content": CommandRouter._CHECKPOINT_DISCIPLINE_PROMPT,
-                    })
-                    result = (
-                        f"Checkpoint discipline activated (reason: \"{reason}\"). "
-                        f"On your next turn, please author updates to your "
-                        f"continuity files (MEMORY.md, intentions, emotional-"
-                        f"memory, etc.) via edit_file / write_file as the "
-                        f"discipline asks. Each write is diff-reviewed by Willow. "
-                        f"The bookmark/pause is a separate concern (Willow may "
-                        f"/save independently if she wants a snapshot for resume)."
-                    )
-                # Special-case: request_plan_approval is operator-gated.
-                elif name == "request_plan_approval":
-                    summary = args.get("summary", "(no summary given)")
-                    raw_plan = args.get("plan", [])
-                    if isinstance(raw_plan, list):
-                        plan = [str(s) for s in raw_plan]
-                    else:
-                        plan = [str(raw_plan)]
-                    if on_plan_approval_request is not None:
-                        # Callback may return bool (legacy) OR
-                        # (bool, str | None) — three-option consent shape.
-                        # See request_checkpoint dispatch above for full notes.
-                        try:
-                            response = on_plan_approval_request(summary, plan)
-                            if isinstance(response, tuple) and len(response) >= 2:
-                                accepted, custom_message = bool(response[0]), response[1]
-                            else:
-                                accepted, custom_message = bool(response), None
-                        except Exception:
-                            log.exception("on_plan_approval_request callback failed")
-                            accepted, custom_message = False, None
-                        if accepted:
-                            base_msg = (
-                                f"Willow approved your plan: \"{summary}\". "
-                                f"You may proceed with the {len(plan)} step(s) "
-                                f"in your next turns."
-                            )
-                            if custom_message:
-                                result = f"{base_msg}\n\nWillow added: \"{custom_message}\""
-                            else:
-                                result = base_msg
-                        else:
-                            if custom_message:
-                                result = (
-                                    f"Willow declined the plan and said:\n\n"
-                                    f"  \"{custom_message}\""
-                                )
-                            else:
-                                result = (
-                                    "Willow declined the plan. The conversation "
-                                    "continues; you may revise the plan and ask "
-                                    "again, or simply continue without the "
-                                    "multi-step work."
-                                )
-                    else:
-                        result = (
-                            "Plan approval requested but no operator confirmation "
-                            "handler is wired in this client. Please ask Willow "
-                            "conversationally."
-                        )
-                # Special-case: git_push is operator-gated (with allowlist short-circuit).
-                elif name == "git_push":
-                    repo_arg = args.get("repo", "")
-                    remote_arg = args.get("remote", "origin")
-
-                    # Resolve repo path + look up remote URL for the prompt.
-                    try:
-                        from ._git_helpers import (
-                            GitError,
-                            get_remote_url,
-                            resolve_repo,
-                            run_git,
-                        )
-                        # Scope warning here is informational only — the git_push
-                        # tool will surface it on its own via with_scope_warning
-                        # when execute() runs after the consent gate. We discard
-                        # this copy to avoid double-printing.
-                        repo_path, _ = resolve_repo(repo_arg, write=True)
-                        remote_url = get_remote_url(repo_path, remote_arg) or "(unknown URL)"
-                    except (GitError, ImportError) as e:
-                        result = f"git_push setup failed: {e}"
-                    else:
-                        # Substring match — "github.com/foo/bar" matches both
-                        # ".../bar" and ".../bar.git" forms.
-                        allowlist = list(self.config.git.push_allowlist)
-                        on_allowlist = is_git_push_allowlisted(remote_url, allowlist)
-
-                        if on_allowlist:
-                            # Auto-approve — dispatch directly.
-                            result = self.tools.dispatch(name, args)
-                        elif on_git_push_request is not None:
-                            # Off-allowlist: gather pending-commit summary for the prompt.
-                            log_rc, log_stdout, _ = run_git(
-                                repo_path,
-                                ["log", "--oneline", "@{u}..HEAD"],
-                            )
-                            if log_rc == 0 and log_stdout.strip():
-                                commits = log_stdout.strip().split("\n")
-                            else:
-                                commits = ["(no pending commits — push may be a no-op)"]
-
-                            try:
-                                response = on_git_push_request(repo_arg, remote_url, commits)
-                                if isinstance(response, tuple) and len(response) >= 2:
-                                    accepted, custom_message = bool(response[0]), response[1]
-                                else:
-                                    accepted, custom_message = bool(response), None
-                            except Exception:
-                                log.exception("on_git_push_request callback failed")
-                                accepted, custom_message = False, None
-
-                            if accepted:
-                                push_result = self.tools.dispatch(name, args)
-                                if custom_message:
-                                    result = f"{push_result}\n\nWillow added: \"{custom_message}\""
-                                else:
-                                    result = push_result
-                            else:
-                                if custom_message:
-                                    result = (
-                                        f"Willow declined the push and said:\n\n"
-                                        f"  \"{custom_message}\""
-                                    )
-                                else:
-                                    result = (
-                                        "Willow declined the push silently. "
-                                        "The conversation continues; you may "
-                                        "revise or simply continue without "
-                                        "pushing right now."
-                                    )
-                        else:
-                            result = (
-                                "git_push requested but no operator confirmation "
-                                "handler is wired in this client. The push was "
-                                "not performed."
-                            )
-                # Special-case: delete_path is operator-gated. Every delete
-                # pings Willow — never auto-approves, by design.
-                elif name == "delete_path":
-                    raw_path = args.get("path", "")
-                    recursive = bool(args.get("recursive", False))
-
-                    # Pre-flight: validate before pinging the operator so
-                    # bad-shape requests get a clear answer the partner can
-                    # act on without bothering Willow.
-                    target = None
-                    pre_error: str | None = None
-                    if not raw_path:
-                        pre_error = "Error: path is required for delete_path."
-                    else:
-                        try:
-                            from partner_client.paths import PathError, resolve_path
-                            target = resolve_path(raw_path, write=True)
-                        except PathError as e:
-                            pre_error = f"Error: {e}"
-                        except ImportError:
-                            pre_error = (
-                                "Error: path resolver not available; client "
-                                "may be misconfigured."
-                            )
-                        else:
-                            if not target.exists():
-                                pre_error = f"Error: path does not exist: {target}"
-                            elif target.is_dir() and not recursive:
-                                try:
-                                    has_children = any(target.iterdir())
-                                except OSError as e:
-                                    pre_error = (
-                                        f"Error reading directory {target}: {e}"
-                                    )
-                                else:
-                                    if has_children:
-                                        pre_error = (
-                                            f"Error: {target} is a non-empty "
-                                            f"directory. Pass recursive=true to "
-                                            f"delete it and its contents."
-                                        )
-
-                    if pre_error is not None:
-                        result = pre_error
-                    elif on_delete_path_request is None:
-                        result = (
-                            "delete_path requested but no operator "
-                            "confirmation handler is wired in this client. "
-                            "Nothing was deleted."
-                        )
-                    else:
-                        # Build a useful summary for the operator prompt.
-                        is_dir = target.is_dir()
-                        if is_dir:
-                            try:
-                                file_count = sum(
-                                    1 for p in target.rglob("*") if p.is_file()
-                                )
-                                dir_count = sum(
-                                    1 for p in target.rglob("*") if p.is_dir()
-                                )
-                                summary = (
-                                    f"directory containing {file_count} file(s) "
-                                    f"and {dir_count} subdirectory(ies)"
-                                )
-                            except OSError:
-                                summary = "directory"
-                        else:
-                            try:
-                                size = target.stat().st_size
-                                summary = f"file ({size:,} bytes)"
-                            except OSError:
-                                summary = "file"
-
-                        if self.timeline is not None:
-                            self.timeline.record(
-                                "delete_path_requested",
-                                path=str(target),
-                                recursive=recursive,
-                                summary=summary,
-                            )
-
-                        try:
-                            response = on_delete_path_request(
-                                target, recursive, summary
-                            )
-                            if isinstance(response, tuple) and len(response) >= 2:
-                                accepted, custom_message = (
-                                    bool(response[0]),
-                                    response[1],
-                                )
-                            else:
-                                accepted, custom_message = bool(response), None
-                        except Exception:
-                            log.exception("on_delete_path_request callback failed")
-                            accepted, custom_message = False, None
-
-                        if self.timeline is not None:
-                            self.timeline.record(
-                                "delete_path_decision",
-                                path=str(target),
-                                recursive=recursive,
-                                accepted=accepted,
-                                custom_message=bool(custom_message),
-                            )
-
-                        if accepted:
-                            try:
-                                if is_dir and recursive:
-                                    import shutil
-                                    shutil.rmtree(target)
-                                elif is_dir:
-                                    target.rmdir()  # empty dir
-                                else:
-                                    target.unlink()
-                                base_msg = (
-                                    f"Willow approved the delete. "
-                                    f"Removed: {target}"
-                                )
-                                if custom_message:
-                                    result = (
-                                        f"{base_msg}\n\nWillow added: "
-                                        f"\"{custom_message}\""
-                                    )
-                                else:
-                                    result = base_msg
-                            except OSError as e:
-                                result = f"Delete failed: {e}"
-                        else:
-                            if custom_message:
-                                result = (
-                                    f"Willow declined the delete and said:\n\n"
-                                    f"  \"{custom_message}\""
-                                )
-                            else:
-                                result = (
-                                    "Willow declined the delete silently. "
-                                    "Nothing was removed; the path is unchanged."
-                                )
-                # Special-case: protect_save. Still special-cased (not run
-                # through normal dispatch) because the dated-archive filename
-                # uses session.session_num, which the model-side tool can't
-                # access. No consent gate as of 2026-05-10 rework -
-                # the operator already approved conversationally when she
-                # asked for the protect; gating again here was redundant
-                # friction. Diff visibility happens after-the-fact via the
-                # tool result (matching edit_file / write_file pattern).
-                elif name == "protect_save":
-                    raw_content = args.get("content", "") or ""
-
-                    if not raw_content.strip():
-                        result = (
-                            "Error: protect_save requires non-empty content. "
-                            "Pass the verbatim exchanges you want preserved."
-                        )
-                    else:
-                        if self.timeline is not None:
-                            self.timeline.record(
-                                "protect_save_requested",
-                                content_chars=len(raw_content),
-                                session_num=session.session_num,
-                            )
-
-                        try:
-                            from .tools_builtin.protect_save import save as protect_save_fn
-                            memory_dir = self.config.resolve(
-                                self.config.memory.memory_dir
-                            )
-                            _, _, result = protect_save_fn(
-                                memory_dir=memory_dir,
-                                partner_name=self.config.identity.name,
-                                session_num=session.session_num,
-                                content=raw_content,
-                            )
-                            if self.timeline is not None:
-                                self.timeline.record(
-                                    "protect_save_completed",
-                                    content_chars=len(raw_content),
-                                    session_num=session.session_num,
-                                )
-                        except OSError as e:
-                            result = f"Protect failed: {e}"
-                else:
-                    result = self.tools.dispatch(name, args)
+                result = dispatch_one_tool_call(
+                    name=name,
+                    args=args,
+                    tool_call_id=tool_call_id,
+                    config=self.config,
+                    tools=self.tools,
+                    timeline=self.timeline,
+                    session=session,
+                    on_plan_approval_request=on_plan_approval_request,
+                    on_git_push_request=on_git_push_request,
+                    on_delete_path_request=on_delete_path_request,
+                )
 
                 tool_invocations.append((name, args, result))
                 if self.timeline is not None:
@@ -868,6 +857,10 @@ class OllamaClient:
                         ui.show_tool_call(name, args, result)
                     except Exception:
                         log.exception("ui.show_tool_call failed")
+
+            # Loop back to the top of the outer `for iteration` to issue
+            # the next chat call with the new tool results in the session.
+            continue
 
         # Hit max iterations — bail with whatever we have. The partner sees
         # this content as their final assistant message; phrase it so they
