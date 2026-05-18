@@ -310,6 +310,7 @@ def resolve_active_model(
     config_model_name: str,
     cli_override: str | None,
     use_interactive: bool,
+    backend: str = "ollama",
     stream=None,
 ) -> tuple[str, str | None]:
     """Resolve which model to use, applying CLI flag / interactive precedence.
@@ -323,10 +324,39 @@ def resolve_active_model(
       2. use_interactive (--choose-model)
       3. config_model_name (TOML default)
 
+    Backend handling:
+      - "ollama" (default): validates the model is in `ollama list` output.
+      - "mlx-lm": skips the Ollama-registry check entirely — mlx-lm models
+        are HuggingFace repo paths (e.g. "mlx-community/gemma-4-31b-it-bf16")
+        which don't appear in Ollama's registry and would always fail the
+        Ollama-flavored check. The doctor's _check_mlx_model_in_hf_cache
+        handles existence-validation for mlx-lm models on a separate path.
+        For interactive picker: mlx-lm operators should set the TOML name
+        directly or use --model (interactive picker is Ollama-list-based).
+
     Side effect: prints picker output to stream when use_interactive=True.
     """
     if stream is None:
         stream = sys.stdout
+
+    # mlx-lm backend: skip Ollama-registry validation entirely. The model
+    # name is an HF repo path; the doctor's HF-cache check validates it on
+    # a separate path. Whatever name the operator chose (TOML / CLI / picker)
+    # is passed through verbatim to MLXClient, which will surface a real
+    # error from mlx_lm.server if the model genuinely doesn't exist.
+    if backend == "mlx-lm":
+        if cli_override is not None:
+            return cli_override, None
+        if use_interactive:
+            # Interactive picker is Ollama-list-based; on mlx-lm just
+            # surface a helpful note rather than running the picker.
+            print(
+                "Note: --choose-model uses `ollama list` which doesn't show "
+                "mlx-lm models. Set [model] name in TOML or use --model "
+                "<hf-repo-path> instead. Using TOML default for now.",
+                file=stream,
+            )
+        return config_model_name, None
 
     entries = list_local_models()
 

@@ -192,6 +192,7 @@ def main() -> int:
         config_model_name=config.model.name,
         cli_override=args.model,
         use_interactive=args.choose_model,
+        backend=config.model.backend,
     )
     if error is not None:
         print(error, file=sys.stderr)

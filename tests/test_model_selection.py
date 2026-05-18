@@ -376,3 +376,75 @@ def test_banner_annotation_unknown_variant_returns_empty() -> None:
     """Unknown models pass through with no annotation — banner just shows the name."""
     assert _model_variant_annotation("llama3.2:latest") == ""
     assert _model_variant_annotation("some-future-model") == ""
+
+
+# ---------- backend-aware resolution (mlx-lm bypass of Ollama check) ----------
+
+
+def test_resolve_active_model_mlx_lm_backend_skips_ollama_check_for_toml_default() -> None:
+    """mlx-lm backend: TOML model name returned without Ollama-registry validation.
+
+    HF-repo-path names like 'mlx-community/gemma-4-31b-it-bf16' don't appear
+    in `ollama list` output and would always fail the Ollama-flavored check.
+    The doctor's HF-cache check handles existence validation on a separate path.
+    """
+    resolved, error = resolve_active_model(
+        config_model_name="mlx-community/gemma-4-31b-it-bf16",
+        cli_override=None,
+        use_interactive=False,
+        backend="mlx-lm",
+    )
+    assert resolved == "mlx-community/gemma-4-31b-it-bf16"
+    assert error is None
+
+
+def test_resolve_active_model_mlx_lm_backend_skips_ollama_check_for_cli_override() -> None:
+    """mlx-lm backend + --model NAME: name passes through without Ollama check."""
+    resolved, error = resolve_active_model(
+        config_model_name="mlx-community/gemma-4-31b-it-bf16",
+        cli_override="mlx-community/gemma-4-31b-8bit",
+        use_interactive=False,
+        backend="mlx-lm",
+    )
+    assert resolved == "mlx-community/gemma-4-31b-8bit"
+    assert error is None
+
+
+def test_resolve_active_model_mlx_lm_backend_interactive_falls_back_to_toml(capsys) -> None:
+    """mlx-lm backend + --choose-model: surfaces a note, falls back to TOML default.
+
+    The interactive picker reads `ollama list` which doesn't show mlx-lm
+    models; safer to fall back to the TOML default than show a misleading
+    picker that can't surface the mlx-lm model.
+    """
+    resolved, error = resolve_active_model(
+        config_model_name="mlx-community/gemma-4-31b-it-bf16",
+        cli_override=None,
+        use_interactive=True,
+        backend="mlx-lm",
+    )
+    assert resolved == "mlx-community/gemma-4-31b-it-bf16"
+    assert error is None
+    captured = capsys.readouterr()
+    assert "mlx-lm" in captured.out.lower() or "TOML" in captured.out
+
+
+def test_resolve_active_model_ollama_backend_still_validates(monkeypatch) -> None:
+    """ollama backend: existing Ollama-registry validation is unchanged.
+
+    Regression guard: the mlx-lm bypass must not weaken the Ollama-side check.
+    """
+    # Force an empty ollama list response
+    fake_ollama = MagicMock()
+    fake_ollama.Client.return_value.list.return_value = MagicMock(models=[])
+    monkeypatch.setitem(__import__("sys").modules, "ollama", fake_ollama)
+
+    resolved, error = resolve_active_model(
+        config_model_name="gemma4:31b-it-q8_0",
+        cli_override=None,
+        use_interactive=False,
+        backend="ollama",
+    )
+    # ollama backend with empty registry: should produce an error
+    assert error is not None
+    assert "not available locally" in error
