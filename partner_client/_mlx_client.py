@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import subprocess
 import time
 from typing import Any, Callable
 
@@ -75,6 +76,10 @@ class MLXClient:
         # so __main__ can shut it down at exit. None when the operator
         # started mlx_lm.server externally.
         self._server_proc = None
+        # File handle for server stdout/stderr capture (when log routing is
+        # enabled). None until _ensure_server_running opens it. close()
+        # flushes and closes this on clean exit.
+        self._server_log_handle = None
 
         # Lazy import to avoid circular import at module load time.
         from .client import setup_scope_env
@@ -141,8 +146,11 @@ class MLXClient:
         """Launch mlx_lm.server as a subprocess if it isn't already running.
 
         Waits up to model.mlx_server_start_timeout seconds for the server
-        to become reachable. Server stdout/stderr are inherited (visible to
-        the operator) so model-load progress and errors are surfaced.
+        to become reachable. Server stdout/stderr are redirected to the file
+        named by model.mlx_server_log_file (default: ~/.partner-client/
+        mlx-server.log) so the chatty per-request access logs / cache state
+        reports / prompt-processing progress don't interleave with the
+        partner UI. Empty string suppresses logs entirely (DEVNULL).
 
         Skipped silently if the server is already reachable (operator may
         have started it externally for debugging or to share across multiple
@@ -154,6 +162,7 @@ class MLXClient:
         import shlex
         import subprocess
         import sys
+        from pathlib import Path
         from urllib.parse import urlparse
 
         parsed = urlparse(self.config.model.mlx_server_url)
@@ -166,13 +175,46 @@ class MLXClient:
         ]
         cmd.extend(self.config.model.mlx_server_extra_args)
 
+        # Resolve where server stdout/stderr should go. Empty string => DEVNULL;
+        # otherwise expand user (~) and create parent dirs as needed, then open
+        # in append mode so logs accumulate across restarts (useful for diagnosing
+        # crash patterns over time).
+        log_target = self.config.model.mlx_server_log_file
+        if log_target == "":
+            self._server_log_handle = subprocess.DEVNULL
+            stdout_arg = subprocess.DEVNULL
+            stderr_arg = subprocess.DEVNULL
+            log_path_str = "(suppressed)"
+        else:
+            log_path = Path(log_target).expanduser()
+            try:
+                log_path.parent.mkdir(parents=True, exist_ok=True)
+                self._server_log_handle = open(log_path, "a", buffering=1)
+                stdout_arg = self._server_log_handle
+                stderr_arg = self._server_log_handle
+                log_path_str = str(log_path)
+            except OSError as e:
+                log.warning(
+                    "Failed to open mlx_server_log_file %s: %s; falling back to DEVNULL",
+                    log_path, e,
+                )
+                self._server_log_handle = subprocess.DEVNULL
+                stdout_arg = subprocess.DEVNULL
+                stderr_arg = subprocess.DEVNULL
+                log_path_str = "(fallback: suppressed)"
+
         if self.timeline is not None:
             self.timeline.record(
                 "mlx_server_launching",
                 cmd=" ".join(shlex.quote(c) for c in cmd),
+                log_file=log_path_str,
             )
         try:
-            self._server_proc = subprocess.Popen(cmd)
+            self._server_proc = subprocess.Popen(
+                cmd,
+                stdout=stdout_arg,
+                stderr=stderr_arg,
+            )
         except (OSError, FileNotFoundError) as e:
             raise RuntimeError(
                 f"Failed to launch mlx_lm.server: {e}\n"
@@ -621,6 +663,8 @@ class MLXClient:
 
         Idempotent. Called by __main__ at clean exit. Operator-started
         servers (when mlx_auto_start_server=False) are not touched.
+        Also closes the log-file handle if one was opened, flushing any
+        buffered server output to disk.
         """
         if self._server_proc is not None:
             try:
@@ -633,3 +677,11 @@ class MLXClient:
                 except Exception:
                     pass
             self._server_proc = None
+        # Close the server log handle (if it's a real file, not DEVNULL).
+        handle = getattr(self, "_server_log_handle", None)
+        if handle is not None and handle is not subprocess.DEVNULL:
+            try:
+                handle.close()
+            except Exception:
+                pass
+            self._server_log_handle = None

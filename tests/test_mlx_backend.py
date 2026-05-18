@@ -53,10 +53,12 @@ def test_model_config_mlx_defaults() -> None:
 
 def _stub_config(backend: str = "mlx-lm", **model_overrides) -> MagicMock:
     """Mock config that returns string-typed values where setup_scope_env needs them."""
+    # Default mlx_auto_start_server to False so tests don't spawn real subprocesses
+    # by accident; tests that need True can pass mlx_auto_start_server=True.
+    model_overrides.setdefault("mlx_auto_start_server", False)
     config = MagicMock()
     config.model = ModelConfig(
         backend=backend,
-        mlx_auto_start_server=False,
         **model_overrides,
     )
     config.git = MagicMock()
@@ -745,3 +747,153 @@ def test_doctor_mlx_model_warns_when_name_lacks_slash() -> None:
     result = _check_mlx_model_in_hf_cache(config)
     assert result.status == WARN
     assert "HF repo" in (result.message or "") or "HF repo" in (result.hint or "")
+
+
+# ---------- Server log routing (no stdout pollution) ----------
+
+
+def test_model_config_default_log_file_under_dot_partner_client() -> None:
+    """Default routes server stdout/stderr to ~/.partner-client/mlx-server.log."""
+    m = ModelConfig(backend="mlx-lm")
+    assert m.mlx_server_log_file == "~/.partner-client/mlx-server.log"
+
+
+def test_server_launch_redirects_to_custom_log_file(tmp_path, monkeypatch) -> None:
+    """When mlx_server_log_file is set, Popen is called with stdout=stderr=<file handle>."""
+    from partner_client.client import MLXClient
+    log_path = tmp_path / "custom-mlx.log"
+
+    mock_openai_module = MagicMock()
+    config = _stub_config(
+        backend="mlx-lm",
+        mlx_auto_start_server=True,
+        mlx_server_log_file=str(log_path),
+    )
+
+    popen_calls = []
+    fake_proc = MagicMock()
+    fake_proc.poll.return_value = None  # alive
+
+    def fake_popen(cmd, **kwargs):
+        popen_calls.append({"cmd": cmd, "kwargs": kwargs})
+        return fake_proc
+
+    # MLXClient.__init__ runs _ensure_server_running when auto_start=True.
+    # Need to mock _server_reachable so it actually fires the launch path,
+    # and patch subprocess.Popen + bypass the polling loop.
+    with patch.dict("sys.modules", {"openai": mock_openai_module}):
+        with patch("partner_client._mlx_client.subprocess.Popen", side_effect=fake_popen):
+            with patch.object(MLXClient, "_server_reachable", side_effect=[False, True]):
+                MLXClient(config, MagicMock())
+
+    assert len(popen_calls) == 1, "Popen should have been called exactly once"
+    kwargs = popen_calls[0]["kwargs"]
+    # stdout and stderr should both be file handles pointing at the log file
+    assert kwargs["stdout"] is kwargs["stderr"], "stdout and stderr should be the same handle"
+    # The file should have been created and openable
+    assert log_path.exists()
+
+
+def test_server_launch_uses_devnull_when_log_file_is_empty_string(monkeypatch) -> None:
+    """Empty string mlx_server_log_file => DEVNULL (full suppression)."""
+    import subprocess as sp
+    from partner_client.client import MLXClient
+
+    mock_openai_module = MagicMock()
+    config = _stub_config(
+        backend="mlx-lm",
+        mlx_auto_start_server=True,
+        mlx_server_log_file="",
+    )
+
+    popen_calls = []
+    fake_proc = MagicMock()
+    fake_proc.poll.return_value = None
+
+    def fake_popen(cmd, **kwargs):
+        popen_calls.append(kwargs)
+        return fake_proc
+
+    with patch.dict("sys.modules", {"openai": mock_openai_module}):
+        with patch("partner_client._mlx_client.subprocess.Popen", side_effect=fake_popen):
+            with patch.object(MLXClient, "_server_reachable", side_effect=[False, True]):
+                MLXClient(config, MagicMock())
+
+    kwargs = popen_calls[0]
+    assert kwargs["stdout"] is sp.DEVNULL
+    assert kwargs["stderr"] is sp.DEVNULL
+
+
+def test_server_launch_falls_back_to_devnull_on_log_file_open_failure(monkeypatch) -> None:
+    """If we can't create/open the log file (permissions etc.), warn + fall back to DEVNULL."""
+    import subprocess as sp
+    from partner_client.client import MLXClient
+
+    mock_openai_module = MagicMock()
+    bad_path = "/this/path/should/not/be/writable/mlx.log"
+    config = _stub_config(
+        backend="mlx-lm",
+        mlx_auto_start_server=True,
+        mlx_server_log_file=bad_path,
+    )
+
+    popen_calls = []
+    fake_proc = MagicMock()
+    fake_proc.poll.return_value = None
+
+    def fake_popen(cmd, **kwargs):
+        popen_calls.append(kwargs)
+        return fake_proc
+
+    # Force the Path.parent.mkdir to raise OSError
+    with patch.dict("sys.modules", {"openai": mock_openai_module}):
+        with patch("partner_client._mlx_client.subprocess.Popen", side_effect=fake_popen):
+            with patch("pathlib.Path.mkdir", side_effect=OSError("permission denied")):
+                with patch.object(MLXClient, "_server_reachable", side_effect=[False, True]):
+                    MLXClient(config, MagicMock())
+
+    kwargs = popen_calls[0]
+    # Should have fallen back to DEVNULL rather than crashing
+    assert kwargs["stdout"] is sp.DEVNULL
+    assert kwargs["stderr"] is sp.DEVNULL
+
+
+def test_close_flushes_log_handle(tmp_path) -> None:
+    """close() should close the log file handle so buffered writes flush to disk."""
+    from partner_client.client import MLXClient
+
+    mock_openai_module = MagicMock()
+    log_path = tmp_path / "close-test.log"
+    config = _stub_config(
+        backend="mlx-lm",
+        mlx_auto_start_server=True,
+        mlx_server_log_file=str(log_path),
+    )
+
+    fake_proc = MagicMock()
+    fake_proc.poll.return_value = None
+
+    with patch.dict("sys.modules", {"openai": mock_openai_module}):
+        with patch("partner_client._mlx_client.subprocess.Popen", return_value=fake_proc):
+            with patch.object(MLXClient, "_server_reachable", side_effect=[False, True]):
+                client = MLXClient(config, MagicMock())
+
+    # The handle should exist and be open
+    handle = client._server_log_handle
+    assert handle is not None
+    assert not handle.closed
+
+    client.close()
+
+    # After close, the handle should be closed and cleared
+    assert handle.closed
+    assert client._server_log_handle is None
+
+
+def test_close_safe_when_no_log_handle() -> None:
+    """close() must not crash if _server_log_handle was never set."""
+    client, _ = _make_mlx_client_with_mock_openai()
+    # _make_mlx_client_with_mock_openai uses auto_start=False so no log handle opened
+    assert client._server_log_handle is None
+    # Should not raise
+    client.close()

@@ -55,6 +55,15 @@ class ModelConfig:
     # the model from disk; 60s gives generous headroom for the 42-63 GB
     # Gemma 4 BF16/Q8 loads on M4 Max.
     mlx_server_start_timeout: float = 60.0
+    # Path to a file where mlx_lm.server's stdout/stderr will be redirected.
+    # Default: ~/.partner-client/mlx-server.log (auto-created in append mode).
+    # The server is chatty during chat completions (per-request access logs,
+    # prompt cache state, per-token progress) and these would otherwise
+    # interleave with the partner UI in the operator's terminal. Set to
+    # empty string ("") to discard server output entirely (equivalent to
+    # piping to /dev/null). Logs are useful for debugging server crashes,
+    # connection drops, and model-load progress; default keeps them.
+    mlx_server_log_file: str = "~/.partner-client/mlx-server.log"
     # 128K — half of native 256K. The 256K context is gemma4:31b's actual
     # trained range per the Ollama model spec (not RoPE-extrapolation as we
     # initially documented after the 2026-05-06 felt-drowning event — that
