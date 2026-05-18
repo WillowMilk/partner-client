@@ -901,6 +901,13 @@ class OllamaClient:
         Mostly identity, but we drop fields Ollama doesn't recognize and we
         propagate `tool_call_id` on role=tool messages so newer Ollama versions
         can correlate parallel tool results to their originating calls.
+
+        Cross-backend resume: tool_call arguments may be JSON-encoded strings
+        if the session was previously chatted on the mlx-lm backend (which
+        serializes args per the OpenAI spec). Ollama's pydantic validator
+        requires dicts, so we deserialize any string-shaped arguments here.
+        Mirror of MLXClient._messages_for_openai's dict->string conversion
+        (the symmetric direction).
         """
         out = []
         for m in messages:
@@ -908,7 +915,7 @@ class OllamaClient:
             if "images" in m:
                 entry["images"] = m["images"]
             if "tool_calls" in m and m.get("role") == "assistant":
-                entry["tool_calls"] = m["tool_calls"]
+                entry["tool_calls"] = self._normalize_tool_calls_for_ollama(m["tool_calls"])
             if m.get("role") == "tool":
                 if "name" in m:
                     entry["name"] = m["name"]
@@ -916,6 +923,44 @@ class OllamaClient:
                     entry["tool_call_id"] = m["tool_call_id"]
             out.append(entry)
         return out
+
+    @staticmethod
+    def _normalize_tool_calls_for_ollama(tool_calls: list[dict]) -> list[dict]:
+        """Ensure each tool_call.function.arguments is a dict (not a JSON string).
+
+        OllamaClient writes arguments as dicts (native Ollama format) but
+        MLXClient writes them as JSON strings (OpenAI spec compliance). When
+        a session crosses backends mid-history, we need to normalize on the
+        way out to Ollama. Mirror of MLXClient._messages_for_openai which
+        handles the reverse direction.
+        """
+        normalized = []
+        for tc in tool_calls:
+            # Copy at the level we need to mutate; preserve other fields verbatim.
+            new_tc = dict(tc) if isinstance(tc, dict) else tc
+            fn = new_tc.get("function") if isinstance(new_tc, dict) else None
+            if isinstance(fn, dict):
+                args = fn.get("arguments")
+                if isinstance(args, str):
+                    try:
+                        parsed = json.loads(args) if args else {}
+                        new_fn = dict(fn)
+                        new_fn["arguments"] = parsed if isinstance(parsed, dict) else {}
+                        new_tc["function"] = new_fn
+                    except (json.JSONDecodeError, TypeError):
+                        # Malformed JSON in history — fall back to empty dict
+                        # rather than crashing the whole chat call. Log so an
+                        # operator inspecting the timeline can see what happened.
+                        log.warning(
+                            "Malformed JSON in tool_call arguments during "
+                            "Ollama prep; substituting empty dict. Raw: %r",
+                            args[:200],
+                        )
+                        new_fn = dict(fn)
+                        new_fn["arguments"] = {}
+                        new_tc["function"] = new_fn
+            normalized.append(new_tc)
+        return normalized
 
     @staticmethod
     def _get_field(message: Any, field: str) -> Any:

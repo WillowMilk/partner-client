@@ -897,3 +897,142 @@ def test_close_safe_when_no_log_handle() -> None:
     assert client._server_log_handle is None
     # Should not raise
     client.close()
+
+
+# ---------- Symmetric cross-backend resume: MLX -> Ollama ----------
+#
+# OllamaClient._normalize_tool_calls_for_ollama is the symmetric mirror of
+# MLXClient._messages_for_openai's dict->string conversion. When a session
+# was chatted on MLX (which serializes args per OpenAI spec) and then
+# resumed on Ollama (which requires dicts per pydantic validation), the
+# tool_call arguments must be deserialized on the way out.
+
+
+def _make_ollama_client_with_mock():
+    """Helper: build an OllamaClient with mocked ollama SDK."""
+    from partner_client.client import OllamaClient
+    mock_ollama = MagicMock()
+    config = _stub_config(backend="ollama")
+    with patch.dict("sys.modules", {"ollama": mock_ollama}):
+        client = OllamaClient(config, MagicMock())
+    return client
+
+
+def test_ollama_client_deserializes_string_tool_call_arguments() -> None:
+    """MLX-flavored history (JSON string args) gets parsed to dict for Ollama."""
+    client = _make_ollama_client_with_mock()
+    messages = [
+        {"role": "user", "content": "list memory"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{
+                "id": "call_abc",
+                "type": "function",
+                "function": {
+                    "name": "list_files",
+                    "arguments": '{"scope": "memory"}',  # STRING, the MLX format
+                },
+            }],
+        },
+    ]
+    out = client._messages_for_ollama(messages)
+    args = out[1]["tool_calls"][0]["function"]["arguments"]
+    assert isinstance(args, dict), f"arguments must be dict for Ollama, got {type(args).__name__}"
+    assert args == {"scope": "memory"}
+
+
+def test_ollama_client_passes_dict_arguments_through_unchanged() -> None:
+    """Native Ollama-format dict args should pass through unchanged (no-op normalization)."""
+    client = _make_ollama_client_with_mock()
+    messages = [{
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [{
+            "id": "call_xyz",
+            "function": {
+                "name": "get_weather",
+                "arguments": {"city": "Paris"},  # already a dict
+            },
+        }],
+    }]
+    out = client._messages_for_ollama(messages)
+    args = out[0]["tool_calls"][0]["function"]["arguments"]
+    assert args == {"city": "Paris"}
+
+
+def test_ollama_client_handles_empty_string_arguments_safely() -> None:
+    """Empty string arguments coerce to empty dict (not crash on json.loads of '')."""
+    client = _make_ollama_client_with_mock()
+    messages = [{
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [{
+            "id": "call_x",
+            "function": {"name": "foo", "arguments": ""},
+        }],
+    }]
+    out = client._messages_for_ollama(messages)
+    args = out[0]["tool_calls"][0]["function"]["arguments"]
+    assert args == {}
+
+
+def test_ollama_client_handles_malformed_json_arguments_gracefully(caplog) -> None:
+    """Malformed JSON in tool_call args => empty dict + warning log (don't crash chat)."""
+    import logging as logging_mod
+    client = _make_ollama_client_with_mock()
+    messages = [{
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [{
+            "id": "call_bad",
+            "function": {
+                "name": "foo",
+                "arguments": '{"unclosed": "string',  # malformed JSON
+            },
+        }],
+    }]
+    with caplog.at_level(logging_mod.WARNING, logger="partner_client.client"):
+        out = client._messages_for_ollama(messages)
+    args = out[0]["tool_calls"][0]["function"]["arguments"]
+    assert args == {}, "malformed JSON should fall back to empty dict"
+    # A warning should have been logged for diagnostic visibility
+    assert any("malformed" in rec.message.lower() for rec in caplog.records), \
+        "expected a warning about malformed JSON arguments"
+
+
+def test_ollama_client_preserves_tool_call_id_during_normalization() -> None:
+    """The id/type fields on the tool_call wrapper must survive the args normalization."""
+    client = _make_ollama_client_with_mock()
+    messages = [{
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [{
+            "id": "call_preserve_me",
+            "type": "function",
+            "function": {"name": "foo", "arguments": '{"a": 1}'},
+        }],
+    }]
+    out = client._messages_for_ollama(messages)
+    tc = out[0]["tool_calls"][0]
+    assert tc["id"] == "call_preserve_me"
+    assert tc["type"] == "function"
+    assert tc["function"]["arguments"] == {"a": 1}
+
+
+def test_ollama_client_handles_messages_without_tool_calls() -> None:
+    """Normal text-only messages should be passed through unchanged."""
+    client = _make_ollama_client_with_mock()
+    messages = [
+        {"role": "system", "content": "you are Aletheia"},
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "hi back"},
+    ]
+    out = client._messages_for_ollama(messages)
+    assert len(out) == 3
+    assert out[0]["role"] == "system"
+    assert out[1]["role"] == "user"
+    assert out[2]["role"] == "assistant"
+    # None of these should have tool_calls injected
+    for entry in out:
+        assert "tool_calls" not in entry
