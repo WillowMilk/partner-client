@@ -208,6 +208,44 @@ class ThinkingConfig:
 
 
 @dataclass
+class PlanModeConfig:
+    """Plan-mode controls for substantive multi-step tasks.
+
+    When mode="on", the system prompt includes plan-mode framing that
+    encourages the partner to call request_plan_approval before
+    destructive actions. Tool dispatch enforces this softly: tools
+    outside the research_only set return a tool-result asking the
+    partner to submit a plan first (the partner sees the message and
+    adapts; no hard-block exception is raised). The partner retains
+    agency to ignore the gate if a special case warrants it — the
+    operator sees what the partner chose to do in either case.
+
+    Always-allowed tools (regardless of research_only list):
+      - request_plan_approval (the way to GET approval; gating it
+        would deadlock)
+      - request_checkpoint (discipline invocation, not destructive)
+      - protect_save (preservation, not destructive)
+
+    Slash commands modify these at runtime:
+      /plan-mode            -> show current state + last-approved plan
+      /plan-mode on         -> enable for this session
+      /plan-mode off        -> disable for this session
+    """
+    mode: str = "off"  # "off" or "on"
+    research_only_tools: list[str] = field(default_factory=lambda: [
+        "read_file", "list_files", "glob_files", "grep_files",
+        "search_web", "fetch_page",
+        "hub_check_inbox", "hub_read_letter", "hub_list_partners",
+    ])
+
+    def __post_init__(self) -> None:
+        if self.mode not in ("off", "on"):
+            raise ConfigError(
+                f"plan_mode.mode must be 'off' or 'on', got '{self.mode}'"
+            )
+
+
+@dataclass
 class HubConfig:
     """Optional Agent Messaging Hub configuration.
 
@@ -254,6 +292,7 @@ class Config:
     hub: HubConfig = field(default_factory=HubConfig)
     git: GitConfig = field(default_factory=GitConfig)
     thinking: ThinkingConfig = field(default_factory=ThinkingConfig)
+    plan_mode: PlanModeConfig = field(default_factory=PlanModeConfig)
 
     @property
     def home_dir(self) -> Path:
@@ -340,6 +379,8 @@ def load_config(path: str | Path) -> Config:
     else:
         thinking = ThinkingConfig(**_filter_known_fields(thinking_raw, ThinkingConfig))
 
+    plan_mode = PlanModeConfig(**_filter_known_fields(data.get("plan_mode", {}), PlanModeConfig))
+
     return Config(
         identity=identity,
         model=model,
@@ -352,6 +393,7 @@ def load_config(path: str | Path) -> Config:
         hub=hub,
         git=git,
         thinking=thinking,
+        plan_mode=plan_mode,
     )
 
 

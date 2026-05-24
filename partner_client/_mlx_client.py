@@ -59,6 +59,12 @@ class MLXClient:
         self.config = config
         self.tools = tools
         self.timeline = timeline
+        # Plan-mode runtime state (parallel to OllamaClient). plan_approved_this_turn
+        # is reset at the start of each chat() invocation and flipped to True
+        # when the partner successfully invokes request_plan_approval.
+        # plan_mode_active is a @property reading live from config.plan_mode.mode
+        # so /plan-mode slash command mutations take effect on the next turn.
+        self.plan_approved_this_turn: bool = False
         try:
             from openai import OpenAI
         except ImportError as e:
@@ -90,6 +96,10 @@ class MLXClient:
         # is running it externally.
         if self.config.model.mlx_auto_start_server:
             self._ensure_server_running()
+
+    @property
+    def plan_mode_active(self) -> bool:
+        return self.config.plan_mode.mode == "on"
 
     def _should_attempt_revive(self, exc: Exception) -> bool:
         """Decide whether a chat-call exception merits an auto-revive attempt.
@@ -320,6 +330,9 @@ class MLXClient:
         tool_invocations: list[tuple[str, dict, str]] = []
         max_iterations = self.config.model.max_tool_iterations
 
+        # Plan-mode: reset per-turn approval state (parallel to OllamaClient).
+        self.plan_approved_this_turn = False
+
         for iteration in range(1, max_iterations + 1):
             content_buf: list[str] = []
             thinking_buf: list[str] = []
@@ -532,6 +545,9 @@ class MLXClient:
                         args = {}
                 tool_started = time.perf_counter()
 
+                def _flip_plan_approved() -> None:
+                    self.plan_approved_this_turn = True
+
                 result = dispatch_one_tool_call(
                     name=name,
                     args=args,
@@ -543,6 +559,10 @@ class MLXClient:
                     on_plan_approval_request=on_plan_approval_request,
                     on_git_push_request=on_git_push_request,
                     on_delete_path_request=on_delete_path_request,
+                    plan_mode_active=self.plan_mode_active,
+                    plan_approved=self.plan_approved_this_turn,
+                    research_only_tools=self.config.plan_mode.research_only_tools,
+                    on_plan_approved=_flip_plan_approved,
                 )
 
                 tool_invocations.append((name, args, result))
@@ -621,6 +641,14 @@ class MLXClient:
                 if "name" in m:
                     entry["name"] = m["name"]
             out.append(entry)
+        # Plan-mode addendum injection (parallel to OllamaClient).
+        from .client import inject_plan_mode_addendum
+        out = inject_plan_mode_addendum(
+            out,
+            self.plan_mode_active,
+            self.plan_approved_this_turn,
+            self.config.plan_mode.research_only_tools,
+        )
         return out
 
     @staticmethod

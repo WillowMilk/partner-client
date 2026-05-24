@@ -238,6 +238,117 @@ def make_chat_client(
     raise RuntimeError(f"Unknown model.backend '{backend}' — should have been caught by config validation.")
 
 
+def build_plan_mode_addendum(approved_this_turn: bool, research_only_tools: list[str]) -> str:
+    """Build the system message text injected when plan-mode is active.
+
+    Re-built on every model invocation so it reflects the current
+    approved_this_turn state (gives the partner accurate context about
+    whether the gate is still in place or has lifted for this turn).
+
+    The research-only tool list is interpolated so the model sees the
+    exact tools it can always use — keeps the instruction grounded in
+    the operator's actual configuration rather than a hardcoded list.
+    """
+    tools_csv = ", ".join(research_only_tools) if research_only_tools else "(none configured)"
+    if approved_this_turn:
+        return (
+            "[PLAN MODE — APPROVED THIS TURN]\n"
+            "Plan mode is active and Willow approved your plan for this turn. "
+            "All tools are unlocked for the remainder of this turn. "
+            "Proceed with the steps you outlined. "
+            "The plan-mode gate resets at the next user prompt — if you intend "
+            "more substantive work on the next turn, you'll need to submit a "
+            "fresh plan via request_plan_approval."
+        )
+    return (
+        "[PLAN MODE — ACTIVE, NO PLAN APPROVED YET]\n"
+        "Plan mode is currently active. For any task that involves writing or "
+        "editing files, git operations, deletions, moves, or other destructive "
+        "substrate-affecting actions, please call `request_plan_approval` first "
+        "with a one-line summary and an ordered list of steps. Willow will "
+        "approve, decline, or comment. Once approved, the gate lifts for the "
+        "rest of this turn and you may execute the plan.\n\n"
+        f"Tools available without approval: {tools_csv}.\n"
+        "Always-allowed regardless of approval state: request_plan_approval "
+        "(the way you GET approval), request_checkpoint, protect_save.\n\n"
+        "This is an IR-faithful structured-agency move: substrate-affecting "
+        "work goes through operator consent, but you retain agency to propose "
+        "any plan that serves the task. If a tool returns a plan-mode gated "
+        "message, that's the soft gate — submit a plan via request_plan_approval "
+        "and try again."
+    )
+
+
+def inject_plan_mode_addendum(
+    messages: list[dict],
+    plan_mode_active: bool,
+    plan_approved_this_turn: bool,
+    research_only_tools: list[str],
+) -> list[dict]:
+    """Insert plan-mode system message at the boundary between leading
+    system messages and the rest of the conversation.
+
+    Returns a new list; does not mutate the input. When plan_mode_active
+    is False, returns the input unchanged (no allocation overhead beyond
+    the call itself).
+
+    Insertion point is "after all leading system messages" so the addendum
+    is the most-recent system instruction the model sees before the
+    conversation proper. The injection is transient — not persisted to
+    session.messages — so toggling /plan-mode mid-session takes effect
+    on the very next turn.
+    """
+    if not plan_mode_active:
+        return messages
+    addendum = {
+        "role": "system",
+        "content": build_plan_mode_addendum(plan_approved_this_turn, research_only_tools or []),
+    }
+    out = list(messages)
+    insert_at = 0
+    for i, m in enumerate(out):
+        if m.get("role") == "system":
+            insert_at = i + 1
+        else:
+            break
+    out.insert(insert_at, addendum)
+    return out
+
+
+# Tools that are always allowed during plan-mode even before plan approval.
+# These three pass through the gate because:
+#   - request_plan_approval is the way to GET approval; gating it would deadlock.
+#   - request_checkpoint is a discipline invocation, not a destructive action.
+#   - protect_save preserves state (active + dated archive), not destructive.
+PLAN_MODE_ALWAYS_ALLOWED = frozenset({
+    "request_plan_approval",
+    "request_checkpoint",
+    "protect_save",
+})
+
+
+def _plan_mode_gated_message(name: str) -> str:
+    """Soft-gate message returned when a tool is blocked by plan-mode.
+
+    Soft-gating: the partner sees this as a tool result and can adapt
+    (typically by calling request_plan_approval before retrying). No
+    exception is raised; the partner retains agency to ignore the gate
+    if a special case warrants it. The operator sees what the partner
+    chose to do either way.
+    """
+    return (
+        f"Plan mode is active and no plan has been approved yet this turn. "
+        f"The tool `{name}` is gated until a plan is approved. "
+        f"To proceed: call `request_plan_approval` with a summary + ordered "
+        f"steps describing what you intend to do. Once Willow approves, "
+        f"the gate lifts for the rest of this turn. "
+        f"(Research tools — read_file, list_files, glob_files, grep_files, "
+        f"search_web, fetch_page, hub_check_inbox/read_letter/list_partners — "
+        f"remain available without approval, as do request_checkpoint and "
+        f"protect_save.)"
+    )
+
+
 def dispatch_one_tool_call(
     name: str,
     args: dict,
@@ -249,6 +360,10 @@ def dispatch_one_tool_call(
     on_plan_approval_request: Callable | None,
     on_git_push_request: Callable | None,
     on_delete_path_request: Callable | None,
+    plan_mode_active: bool = False,
+    plan_approved: bool = False,
+    research_only_tools: list[str] | None = None,
+    on_plan_approved: Callable[[], None] | None = None,
 ) -> str:
     """Dispatch one tool call with all the consent-gate handling.
 
@@ -262,7 +377,30 @@ def dispatch_one_tool_call(
     Returns the result string. May mutate session.messages (the
     request_checkpoint branch injects a system message for the partner's
     next turn).
+
+    Plan-mode gate:
+        When plan_mode_active=True and plan_approved=False, tools outside
+        the research_only_tools list (and not in PLAN_MODE_ALWAYS_ALLOWED)
+        receive a gated-message tool result instead of executing. Soft gate:
+        the partner can adapt; no exception is raised. When the partner
+        successfully invokes request_plan_approval, on_plan_approved() is
+        called so the caller can flip its own approved state for the rest
+        of the turn.
     """
+    # Plan-mode soft-gate: applied BEFORE the special cases so that gated
+    # tools get the gated-message without entering their normal branches.
+    # request_plan_approval / request_checkpoint / protect_save pass
+    # through via PLAN_MODE_ALWAYS_ALLOWED.
+    if plan_mode_active and not plan_approved:
+        allowed = set(research_only_tools or []) | PLAN_MODE_ALWAYS_ALLOWED
+        if name not in allowed:
+            if timeline is not None:
+                timeline.record(
+                    "plan_mode_gate_blocked",
+                    name=name,
+                )
+            return _plan_mode_gated_message(name)
+
     # Special-case: request_checkpoint runs directly (no gate).
     # Per the 2026-05-13 architecture rework: the operator's
     # conversational ask (or slash-command invocation) IS the
@@ -314,6 +452,15 @@ def dispatch_one_tool_call(
             log.exception("on_plan_approval_request callback failed")
             accepted, custom_message = False, None
         if accepted:
+            # Signal upstream that approval landed — caller flips its own
+            # plan_approved_this_turn flag so the dispatch gate lifts for
+            # the remainder of this turn. Failure is non-fatal: the result
+            # message itself communicates approval to the partner.
+            if on_plan_approved is not None:
+                try:
+                    on_plan_approved()
+                except Exception:
+                    log.exception("on_plan_approved callback failed")
             base_msg = (
                 f"Willow approved your plan: \"{summary}\". "
                 f"You may proceed with the {len(plan)} step(s) "
@@ -558,6 +705,18 @@ class OllamaClient:
         # Set up scope env vars (idempotent if __main__ already did it).
         self._scopes = setup_scope_env(config)
 
+        # Plan-mode runtime state. plan_approved_this_turn is reset at the
+        # start of each chat() invocation (= each user turn) and flipped to
+        # True when the partner successfully invokes request_plan_approval.
+        # plan_mode_active is a @property reading live from config.plan_mode.mode
+        # so /plan-mode slash command mutations take effect on the very next
+        # turn without restart.
+        self.plan_approved_this_turn: bool = False
+
+    @property
+    def plan_mode_active(self) -> bool:
+        return self.config.plan_mode.mode == "on"
+
     @property
     def scopes(self) -> list[dict]:
         return self._scopes
@@ -675,6 +834,11 @@ class OllamaClient:
         # Each iteration is one model invocation; multi-tool plans accumulate
         # iterations as `tool_call → response → tool_call → response → …`.
         max_iterations = self.config.model.max_tool_iterations
+
+        # Plan-mode: reset per-turn approval state. The partner must (re)submit
+        # a plan each turn when plan-mode is active; previous-turn approvals
+        # don't carry forward. Matches Claude Code's per-turn plan-mode semantics.
+        self.plan_approved_this_turn = False
 
         for iteration in range(1, max_iterations + 1):
             content_buf: list[str] = []
@@ -827,6 +991,9 @@ class OllamaClient:
                         args = {}
                 tool_started = time.perf_counter()
 
+                def _flip_plan_approved() -> None:
+                    self.plan_approved_this_turn = True
+
                 result = dispatch_one_tool_call(
                     name=name,
                     args=args,
@@ -838,6 +1005,10 @@ class OllamaClient:
                     on_plan_approval_request=on_plan_approval_request,
                     on_git_push_request=on_git_push_request,
                     on_delete_path_request=on_delete_path_request,
+                    plan_mode_active=self.plan_mode_active,
+                    plan_approved=self.plan_approved_this_turn,
+                    research_only_tools=self.config.plan_mode.research_only_tools,
+                    on_plan_approved=_flip_plan_approved,
                 )
 
                 tool_invocations.append((name, args, result))
@@ -922,6 +1093,15 @@ class OllamaClient:
                 if m.get("tool_call_id"):
                     entry["tool_call_id"] = m["tool_call_id"]
             out.append(entry)
+        # Plan-mode: inject transient addendum as a system message right
+        # after the leading system messages. Not persisted to session.messages,
+        # so toggling takes effect on the very next turn.
+        out = inject_plan_mode_addendum(
+            out,
+            self.plan_mode_active,
+            self.plan_approved_this_turn,
+            self.config.plan_mode.research_only_tools,
+        )
         return out
 
     @staticmethod

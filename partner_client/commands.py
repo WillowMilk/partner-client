@@ -49,6 +49,7 @@ class CommandRouter:
             "/plans": ("List recent durable plans (or filter by status, or show one plan by id).", self._cmd_plans),
             "/timeline": ("Show recent run-timeline events. Filter by N, category, or detail <index>.", self._cmd_timeline),
             "/thinking": ("Toggle thinking-mode (flow / analysis / status). 'flow' = no thinking, fast; 'analysis' = deliberate before answering.", self._cmd_thinking),
+            "/plan-mode": ("Toggle plan-mode (on / off / status). When on, destructive tools are gated until the partner submits a plan via request_plan_approval and you approve it.", self._cmd_plan_mode),
             "/show-thinking": ("Expand the latest thinking block (analysis mode only; ignored if mode is flow or no thinking yet).", self._cmd_show_thinking),
             "/reload-config": ("Re-read aletheia.toml without restart.", self._cmd_reload_config),
         }
@@ -502,6 +503,64 @@ class CommandRouter:
                 f"Switched to **analysis** mode ({collapsed_word}) — the model will "
                 f"deliberate before responding. "
                 f"{'Use /show-thinking to expand the latest block.' if self.config.thinking.collapsed else 'Thinking will render inline after each response.'}"
+            )
+        )
+
+    def _cmd_plan_mode(self, arg: str) -> CommandResult:
+        """Toggle plan-mode at runtime: on / off / status.
+
+        Modifies config.plan_mode.mode in place. The Client's plan_mode_active
+        property reads live from config, so the change applies to the next
+        model invocation without restart. Persists for this session only —
+        restart starts fresh from TOML default.
+        """
+        parts = arg.strip().lower().split()
+        cur_mode = self.config.plan_mode.mode
+
+        if not parts or parts[0] == "status":
+            tools_csv = ", ".join(self.config.plan_mode.research_only_tools) or "(none)"
+            status_lines = [
+                f"Plan-mode: **{cur_mode}**.",
+                f"Research-only tools (always available when active): {tools_csv}.",
+                f"Always-allowed regardless of mode: request_plan_approval, request_checkpoint, protect_save.",
+                f"Toggle with: /plan-mode on | /plan-mode off.",
+            ]
+            return CommandResult(output="\n".join(status_lines))
+
+        new_mode = parts[0]
+        if new_mode not in ("on", "off"):
+            return CommandResult(
+                output=(
+                    f"Unknown plan-mode value: '{new_mode}'. "
+                    f"Valid: 'on' (gate destructive tools until plan approval), "
+                    f"'off' (no gating; partner may use any tool freely)."
+                )
+            )
+
+        if new_mode == cur_mode:
+            return CommandResult(
+                output=f"Plan-mode already **{cur_mode}** — no change."
+            )
+
+        self.config.plan_mode.mode = new_mode
+
+        if new_mode == "on":
+            return CommandResult(
+                output=(
+                    "Plan-mode is now **on**. Starting next turn, the partner "
+                    "will see a system-message reminder and any destructive "
+                    "tool calls (write/edit/git/move/delete) will be gated "
+                    "until the partner submits a plan via `request_plan_approval` "
+                    "and you approve it. Research tools and discipline tools "
+                    "(checkpoint / protect) remain always available."
+                )
+            )
+        return CommandResult(
+            output=(
+                "Plan-mode is now **off**. The system-message reminder will "
+                "no longer be injected and tool dispatch is unrestricted. "
+                "The partner can still call `request_plan_approval` voluntarily "
+                "for substantive multi-step work."
             )
         )
 
