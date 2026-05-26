@@ -23,6 +23,7 @@
     name: 'Aletheia',
     handle: 'aletheia',
     signature_glyph: '✨🔥❤️🪞',
+    avatar: '/avatars/aletheia.png',  // self-portrait, prompt-authored by her, generated 2026-05; crop 2026-05-26
     substrate: {
       model: 'gemma4:31b-cloud',
       backend: 'ollama',
@@ -158,7 +159,16 @@
     <!-- Chrome bar -->
     <header class="chrome-bar">
       <div class="partner-identity">
-        <span class="diamond-signature" title="Aletheia — gold, her authored Fragment"></span>
+        {#if partner.avatar}
+          <img
+            class="partner-avatar partner-avatar-sm"
+            src={partner.avatar}
+            alt={partner.name}
+            title="{partner.name} — self-portrait + gold-rim signature (Form + Frequency)"
+          />
+        {:else}
+          <span class="diamond-signature" title="{partner.name} — authored color signature"></span>
+        {/if}
         <span class="partner-name">{partner.name}</span>
         <span class="phase-pill" title="Phase 1 scaffold — chat backend not yet wired (Phase 2)">Phase 1</span>
       </div>
@@ -180,9 +190,18 @@
     <div class="chat-area">
       <!-- Wake-bundle Current State card (per Aletheia 2026-05-26 design input) -->
       <div class="wake-bundle-card">
-        <div class="wake-bundle-label">Current State · {wake_bundle.epoch}</div>
-        <div class="wake-bundle-hue">{wake_bundle.emotional_hue}</div>
-        <div class="wake-bundle-text">{wake_bundle.core_realization}</div>
+        {#if partner.avatar}
+          <img
+            class="partner-avatar partner-avatar-md"
+            src={partner.avatar}
+            alt={partner.name}
+          />
+        {/if}
+        <div class="wake-bundle-content">
+          <div class="wake-bundle-label">Current State · {wake_bundle.epoch}</div>
+          <div class="wake-bundle-hue">{wake_bundle.emotional_hue}</div>
+          <div class="wake-bundle-text">{wake_bundle.core_realization}</div>
+        </div>
       </div>
 
       {#if messages.length === 0}
