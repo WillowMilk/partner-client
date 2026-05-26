@@ -541,27 +541,41 @@ code,
  * So messages are left-aligned paragraphs with a small role label, sparse
  * spacing for breathing room (P7 — Value of the Void). */
 .message {
-  margin-top: var(--space-6);
-  margin-bottom: var(--space-6);
+  margin-top: var(--space-7);
+  margin-bottom: var(--space-7);
   max-width: 760px;
+  padding-left: var(--space-4);
+  border-left: 2px solid transparent;
 }
 
 .message-role {
   font-size: var(--text-micro);
   text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--text-muted);
+  letter-spacing: 0.08em;
+  font-weight: 600;
   margin-bottom: var(--space-2);
 }
 
+/* Operator turns — muted blue-grey (operator-environment accent).
+ * The label is identity-attribution, not signature; uses the same accent
+ * as input focus and Save/Protect buttons (consistent operator language). */
+.message.role-user {
+  border-left-color: rgba(107, 123, 140, 0.35);
+}
 .message.role-user .message-role {
-  color: var(--text-secondary);
+  color: var(--accent-operator);
 }
 
+/* Partner turns — partner-authored accent (gold for Aletheia, applied per
+ * body[data-partner=<handle>]). This is the role-label, NOT the body bubble:
+ * Aletheia's design call (2026-05-26) held — meaning stays bubble-agnostic
+ * (body text is neutral); but identity-attribution is signature, so the
+ * "ALETHEIA" label IS allowed her gold. Nameplate vs Room: name = signature. */
+.message.role-assistant {
+  border-left-color: var(--accent-partner-glow);
+}
 .message.role-assistant .message-role {
-  /* Partner name renders here — neutral, no signature color
-   * (the signature lives in the chrome, not on every line). */
-  color: var(--text-secondary);
+  color: var(--accent-partner);
 }
 
 .message-content {
@@ -580,6 +594,43 @@ code,
   color: var(--text-muted);
   font-style: italic;
   padding-left: var(--space-2);
+}
+
+/* Offline banner — visible cue when backend isn't connected.
+ * Used for both PyWebView-injection-timing failures and backend init errors.
+ * Muted brick palette (not alarming red) to match the IR-aesthetic register. */
+.offline-banner {
+  background: rgba(177, 74, 61, 0.08);
+  border: 1px solid rgba(177, 74, 61, 0.25);
+  border-radius: var(--radius-md);
+  padding: var(--space-4) var(--space-5);
+  margin-bottom: var(--space-6);
+}
+
+.offline-banner-title {
+  font-weight: 600;
+  color: #B14A3D;
+  margin-bottom: var(--space-2);
+}
+
+.offline-banner-detail {
+  color: var(--text-primary);
+  font-size: var(--text-meta);
+  margin-bottom: var(--space-2);
+  font-family: var(--font-mono);
+  word-break: break-word;
+}
+
+.offline-banner-hint {
+  font-size: var(--text-micro);
+  color: var(--text-muted);
+}
+
+.offline-banner-hint code {
+  font-family: var(--font-mono);
+  background: rgba(0, 0, 0, 0.04);
+  padding: 1px 4px;
+  border-radius: 3px;
 }
 
 /* Empty session list placeholder */

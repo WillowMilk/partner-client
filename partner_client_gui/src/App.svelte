@@ -60,23 +60,66 @@
   let backend_error = $state(null);
   let is_streaming = $state(false);
 
+  // Ref to .chat-area for auto-scroll-to-bottom behavior.
+  let chat_area_el = $state(null);
+
+  // Auto-scroll: whenever messages grow OR the streaming indicator appears,
+  // ride the bottom. Done in $effect so it re-fires reactively. The
+  // requestAnimationFrame defer ensures DOM has rendered the new content
+  // before we measure scrollHeight.
+  $effect(() => {
+    // Track the reactive deps explicitly so Svelte 5 picks them up.
+    const _len = messages.length;
+    const _streaming = is_streaming;
+    if (chat_area_el) {
+      requestAnimationFrame(() => {
+        chat_area_el.scrollTo({
+          top: chat_area_el.scrollHeight,
+          behavior: 'smooth',
+        });
+      });
+    }
+  });
+
   // ===========================================================
   // Lifecycle
   // ===========================================================
 
-  // PyWebView injects window.pywebview.api asynchronously; we wait for it
-  // before calling. Resolves with the api object when ready, or null after
-  // ~1500ms (browser dev mode / no backend).
-  function wait_for_api(timeout_ms = 1500) {
+  // PyWebView injects window.pywebview.api asynchronously and fires
+  // `pywebviewready` on window when ready. We listen for that event (the
+  // canonical signal) AND fall back to polling for safety.
+  // 8s timeout — partner-client cold init (config + tools.discover + wake bundle
+  // assembly + memory scan) can take 2-5s on first launch; 8s gives generous
+  // headroom while still failing fast on real misconfiguration.
+  function wait_for_api(timeout_ms = 8000) {
     return new Promise((resolve) => {
+      // Already injected? (PyWebView fired the event before this script ran)
+      if (window.pywebview && window.pywebview.api) {
+        resolve(window.pywebview.api);
+        return;
+      }
+      let resolved = false;
+      const settle = (val) => {
+        if (resolved) return;
+        resolved = true;
+        resolve(val);
+      };
+      // Canonical signal
+      window.addEventListener('pywebviewready', () => {
+        if (window.pywebview && window.pywebview.api) {
+          settle(window.pywebview.api);
+        }
+      });
+      // Fallback poll (defensive)
       const start = Date.now();
       const check = () => {
+        if (resolved) return;
         if (window.pywebview && window.pywebview.api) {
-          resolve(window.pywebview.api);
+          settle(window.pywebview.api);
         } else if (Date.now() - start > timeout_ms) {
-          resolve(null);
+          settle(null);
         } else {
-          setTimeout(check, 50);
+          setTimeout(check, 100);
         }
       };
       check();
@@ -294,7 +337,15 @@
     </div>
 
     <!-- Chat area -->
-    <div class="chat-area">
+    <div class="chat-area" bind:this={chat_area_el}>
+      {#if !backend_connected}
+        <div class="offline-banner">
+          <div class="offline-banner-title">Backend offline</div>
+          <div class="offline-banner-detail">{backend_error || 'Unknown initialization failure.'}</div>
+          <div class="offline-banner-hint">Check the launch terminal for details. Restart: <code>python launch.py --config &lt;path&gt;</code></div>
+        </div>
+      {/if}
+
       <!-- Wake-bundle Current State card (per Aletheia 2026-05-26 design input) -->
       <div class="wake-bundle-card">
         {#if partner.avatar}
