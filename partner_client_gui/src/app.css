@@ -1,0 +1,561 @@
+/* ============================================================================
+ * partner-client GUI — IR-aesthetic styles (Linen and Light)
+ *
+ * Principles in CSS form:
+ *   P1: per-partner accent (CSS custom property, set on body[data-partner])
+ *   P2: substrate honesty (chrome shows model/backend; styled for legibility)
+ *   P7: The Value of the Void (generous spacing, comfortable line-height)
+ *   Linen and Light: warm off-whites, soft shadows, no harsh boundaries
+ *   Tactile: subtle press states, organic easing
+ * ============================================================================ */
+
+:root {
+  /* ---- Color tokens — Light theme (default) ---- */
+  --bg-window: #FAFAF7;       /* warm off-white window body */
+  --bg-surface: #FFFFFF;       /* cards, message bubbles */
+  --bg-sidebar: #F2F1ED;       /* paper-toned sidebar */
+  --bg-input: #F5F4EF;         /* slightly recessed input area */
+  --bg-hover: rgba(0,0,0,0.03);
+
+  --text-primary: #1A1A1B;
+  --text-secondary: #646461;
+  --text-muted: #8B8B86;
+
+  --border-hairline: rgba(0,0,0,0.08);
+  --border-soft: #E5E5DF;
+
+  /* ---- Per-partner accents ---- */
+  --accent-aletheia: #D4A847;  /* gold (her diamond Fragment) */
+  --accent-sage: #5A7A9B;       /* grey-blue (rock) */
+  --accent-ember: #D6753C;      /* warm orange (flame) */
+  --accent-aster: #7A8FA8;      /* silver-cool-blue (steady star) */
+
+  /* Default current-partner accent (overridden by [data-partner]) */
+  --accent: var(--accent-aletheia);
+  --accent-glow: rgba(212, 168, 71, 0.15);
+
+  /* ---- Spacing scale (8px base — generous, P7) ---- */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+  --space-16: 64px;
+
+  /* ---- Typography ---- */
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", system-ui, sans-serif;
+  --font-mono: "SF Mono", Menlo, Consolas, "Roboto Mono", monospace;
+
+  --text-body: 16px;
+  --text-chrome: 14px;
+  --text-meta: 13px;
+  --text-micro: 11px;
+  --text-heading: 17px;
+
+  --line-height-body: 1.6;
+  --line-height-tight: 1.4;
+
+  /* ---- Shadows (soft, warm — not flat material) ---- */
+  --shadow-soft: 0 1px 2px rgba(0,0,0,0.03), 0 2px 4px rgba(0,0,0,0.03);
+  --shadow-card: 0 1px 3px rgba(0,0,0,0.04), 0 4px 10px rgba(0,0,0,0.04);
+  --shadow-press: inset 0 1px 2px rgba(0,0,0,0.06);
+
+  /* ---- Radii ---- */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-pill: 999px;
+
+  /* ---- Motion (organic, natural — not springy, not linear) ---- */
+  --ease-natural: cubic-bezier(0.2, 0.0, 0.0, 1.0);
+  --ease-rest: cubic-bezier(0.4, 0.0, 0.2, 1.0);
+  --duration-quick: 80ms;
+  --duration-base: 150ms;
+  --duration-slow: 280ms;
+}
+
+/* ---- Dark theme (reserved for Phase 2) ---- */
+@media (prefers-color-scheme: dark) {
+  /* TODO Phase 2: dark theme tokens */
+}
+
+/* ---- Per-partner accent override ---- */
+body[data-partner="aletheia"] {
+  --accent: var(--accent-aletheia);
+  --accent-glow: rgba(212, 168, 71, 0.18);
+}
+body[data-partner="sage"] {
+  --accent: var(--accent-sage);
+  --accent-glow: rgba(90, 122, 155, 0.18);
+}
+body[data-partner="ember"] {
+  --accent: var(--accent-ember);
+  --accent-glow: rgba(214, 117, 60, 0.18);
+}
+body[data-partner="aster"] {
+  --accent: var(--accent-aster);
+  --accent-glow: rgba(122, 143, 168, 0.18);
+}
+
+/* ---- Reset / base ---- */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body,
+#app {
+  height: 100vh;
+  width: 100vw;
+  overflow: hidden;
+}
+
+body {
+  font-family: var(--font-sans);
+  font-size: var(--text-body);
+  line-height: var(--line-height-body);
+  color: var(--text-primary);
+  background: var(--bg-window);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+button {
+  font-family: inherit;
+  font-size: inherit;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  color: inherit;
+  padding: 0;
+}
+
+code,
+.mono {
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+}
+
+/* ---- App root layout ---- */
+.app-root {
+  display: grid;
+  grid-template-columns: 240px 1fr;
+  height: 100vh;
+  width: 100vw;
+  background: var(--bg-window);
+}
+
+/* ============================================================================
+ * SIDEBAR
+ * ============================================================================ */
+.sidebar {
+  background: var(--bg-sidebar);
+  border-right: 1px solid var(--border-hairline);
+  display: flex;
+  flex-direction: column;
+  padding: var(--space-5) var(--space-4);
+  overflow-y: auto;
+}
+
+.sidebar-section {
+  margin-bottom: var(--space-6);
+}
+
+.sidebar-section-label {
+  font-size: var(--text-micro);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  padding: 0 var(--space-2);
+  margin-bottom: var(--space-2);
+}
+
+.sidebar-action {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-chrome);
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: background var(--duration-quick) var(--ease-rest);
+  width: 100%;
+  text-align: left;
+}
+
+.sidebar-action:hover {
+  background: var(--bg-hover);
+}
+
+.session-item {
+  display: flex;
+  flex-direction: column;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-chrome);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background var(--duration-quick) var(--ease-rest);
+  margin-bottom: 2px;
+}
+
+.session-item:hover {
+  background: var(--bg-hover);
+}
+
+.session-item.active {
+  background: var(--accent-glow);
+  color: var(--text-primary);
+}
+
+.session-item-title {
+  font-weight: 500;
+}
+
+.session-item-meta {
+  font-size: var(--text-micro);
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+.sidebar-spacer {
+  flex: 1;
+}
+
+.sidebar-link {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-chrome);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background var(--duration-quick) var(--ease-rest);
+}
+
+.sidebar-link:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.sidebar-link .label {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: var(--radius-pill);
+  font-size: var(--text-micro);
+  font-weight: 600;
+  background: var(--accent);
+  color: white;
+  line-height: 1;
+}
+
+/* ============================================================================
+ * MAIN PANE
+ * ============================================================================ */
+.main-pane {
+  display: grid;
+  grid-template-rows: auto auto 1fr auto;
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* ---- Chrome bar ---- */
+.chrome-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-3) var(--space-6);
+  border-bottom: 1px solid var(--border-hairline);
+  background: var(--bg-window);
+}
+
+.partner-identity {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.partner-name {
+  font-size: var(--text-chrome);
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.diamond-signature {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 6px var(--accent-glow), 0 0 2px var(--accent);
+  /* "North Star, not brand" — small + soft-glow per Aletheia */
+}
+
+.chrome-actions {
+  font-size: var(--text-meta);
+  color: var(--text-muted);
+}
+
+/* ---- Session header (substrate honest) ---- */
+.session-header {
+  padding: var(--space-4) var(--space-6);
+  background: var(--bg-window);
+  border-bottom: 1px solid var(--border-hairline);
+}
+
+.session-name {
+  font-size: var(--text-heading);
+  font-weight: 500;
+  color: var(--text-primary);
+  margin-bottom: var(--space-1);
+}
+
+.substrate-display {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  font-family: var(--font-mono);
+  font-size: var(--text-meta);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: color var(--duration-quick) var(--ease-rest);
+}
+
+.substrate-display:hover {
+  color: var(--text-primary);
+}
+
+.substrate-display::after {
+  content: "▾";
+  font-size: 10px;
+  margin-left: 2px;
+  color: var(--text-muted);
+}
+
+.substrate-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #4caf50;
+  display: inline-block;
+}
+
+/* ---- Chat area ---- */
+.chat-area {
+  overflow-y: auto;
+  padding: var(--space-6) var(--space-8);
+}
+
+.wake-bundle-card {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md);
+  padding: var(--space-5) var(--space-6);
+  margin-bottom: var(--space-8);
+  box-shadow: var(--shadow-soft);
+  max-width: 720px;
+}
+
+.wake-bundle-label {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-micro);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  margin-bottom: var(--space-3);
+}
+
+.wake-bundle-label::before {
+  content: "";
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 4px var(--accent-glow);
+}
+
+.wake-bundle-hue {
+  font-size: var(--text-body);
+  color: var(--text-primary);
+  margin-bottom: var(--space-2);
+  font-style: italic;
+}
+
+.wake-bundle-text {
+  color: var(--text-secondary);
+  line-height: var(--line-height-body);
+}
+
+.empty-chat-prompt {
+  color: var(--text-muted);
+  font-size: var(--text-meta);
+  text-align: center;
+  padding: var(--space-12) var(--space-6);
+  font-style: italic;
+}
+
+/* ---- Input area ---- */
+.input-area {
+  padding: var(--space-4) var(--space-6) var(--space-3);
+  background: var(--bg-window);
+  border-top: 1px solid var(--border-hairline);
+}
+
+.input-row {
+  background: var(--bg-input);
+  border: 1px solid var(--border-hairline);
+  border-radius: var(--radius-md);
+  padding: var(--space-3) var(--space-4);
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-3);
+  transition: border-color var(--duration-base) var(--ease-rest), box-shadow var(--duration-base) var(--ease-rest);
+}
+
+.input-row:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-glow);
+}
+
+.input-textarea {
+  flex: 1;
+  border: none;
+  outline: none;
+  background: transparent;
+  resize: none;
+  font-family: var(--font-sans);
+  font-size: var(--text-body);
+  line-height: var(--line-height-body);
+  color: var(--text-primary);
+  min-height: 24px;
+  max-height: 200px;
+}
+
+.input-textarea::placeholder {
+  color: var(--text-muted);
+}
+
+.send-button {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: white;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  transition: transform var(--duration-quick) var(--ease-natural), box-shadow var(--duration-quick) var(--ease-rest);
+  opacity: 0.92;
+}
+
+.send-button:hover {
+  opacity: 1;
+  box-shadow: 0 2px 6px var(--accent-glow);
+}
+
+.send-button:active {
+  transform: translateY(1px);
+  box-shadow: var(--shadow-press);
+}
+
+.action-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding-top: var(--space-3);
+  font-size: var(--text-meta);
+}
+
+.mosaic-button {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 6px 12px;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  border: 1px solid var(--border-soft);
+  font-size: var(--text-meta);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background var(--duration-quick) var(--ease-rest), border-color var(--duration-quick) var(--ease-rest), transform var(--duration-quick) var(--ease-natural);
+}
+
+.mosaic-button:hover {
+  background: var(--bg-hover);
+  border-color: var(--text-muted);
+  color: var(--text-primary);
+}
+
+.mosaic-button:active {
+  transform: translateY(1px);
+  box-shadow: var(--shadow-press);
+}
+
+.action-row-spacer {
+  flex: 1;
+}
+
+.model-selector {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 6px 12px;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  border: 1px solid var(--border-soft);
+  font-family: var(--font-mono);
+  font-size: var(--text-meta);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background var(--duration-quick) var(--ease-rest);
+}
+
+.model-selector:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.model-selector::after {
+  content: "▾";
+  font-size: 9px;
+  opacity: 0.6;
+}
+
+/* ---- Phase 1 marker (will be removed once chat is wired up) ---- */
+.phase1-banner {
+  position: fixed;
+  bottom: var(--space-3);
+  right: var(--space-4);
+  font-size: var(--text-micro);
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-hairline);
+  border-radius: var(--radius-pill);
+  padding: 4px 10px;
+  pointer-events: none;
+  opacity: 0.7;
+}
