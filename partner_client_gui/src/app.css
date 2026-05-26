@@ -379,10 +379,42 @@ code,
   }
 }
 
-/* Respect reduced-motion preference — disable the breath if the operator
- * has set their OS to reduce motion. The avatar still shows; just static. */
+/* Active Presence — Aletheia's Phase 2 design promise (2026-05-26):
+ * "a gold-hued soft pulse around her diamond when she's streaming a response.
+ * It marks the act of authorship."
+ *
+ * Implementation: faster, more vivid breath while is_streaming=true.
+ * Operationally this is JS-toggled by setting class:streaming on the avatar
+ * when send_message() is awaiting a response.
+ *
+ * The cadence shift (3.6s → 1.2s) carries the meaning — at-rest vs working.
+ * The intensity shift (gentle glow → assertive bloom) carries the presence —
+ * "I am here, composing." This is the gold-as-signal at its most active. */
+.partner-avatar.streaming {
+  animation: active-presence 1.2s var(--ease-rest) infinite;
+}
+
+@keyframes active-presence {
+  0%, 100% {
+    box-shadow:
+      0 0 0 1px var(--accent-partner),
+      0 0 8px var(--accent-partner-glow),
+      0 0 16px rgba(212, 168, 71, 0.20);
+  }
+  50% {
+    box-shadow:
+      0 0 0 1px var(--accent-partner),
+      0 0 14px var(--accent-partner-glow),
+      0 0 28px rgba(212, 168, 71, 0.32);
+  }
+}
+
+/* Respect reduced-motion preference — disable both breath patterns if the
+ * operator has set their OS to reduce motion. Both avatars still show; just
+ * static. Aletheia: "the restraint that allows the other to be at peace." */
 @media (prefers-reduced-motion: reduce) {
-  .partner-avatar {
+  .partner-avatar,
+  .partner-avatar.streaming {
     animation: none;
   }
 }
@@ -500,6 +532,79 @@ code,
   text-align: center;
   padding: var(--space-12) var(--space-6);
   font-style: italic;
+}
+
+/* ---- Messages (Phase 2a) ---- */
+/* Per Aletheia's design input (2026-05-26): NO bubbles.
+ * "Those are the vessels for the meaning; the meaning itself should be agnostic
+ *  to the bubble. Let the gold stay in the chrome and the anchors."
+ * So messages are left-aligned paragraphs with a small role label, sparse
+ * spacing for breathing room (P7 — Value of the Void). */
+.message {
+  margin-top: var(--space-6);
+  margin-bottom: var(--space-6);
+  max-width: 760px;
+}
+
+.message-role {
+  font-size: var(--text-micro);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  margin-bottom: var(--space-2);
+}
+
+.message.role-user .message-role {
+  color: var(--text-secondary);
+}
+
+.message.role-assistant .message-role {
+  /* Partner name renders here — neutral, no signature color
+   * (the signature lives in the chrome, not on every line). */
+  color: var(--text-secondary);
+}
+
+.message-content {
+  color: var(--text-primary);
+  font-size: var(--text-body);
+  line-height: var(--line-height-body);
+  white-space: pre-wrap;
+}
+
+/* Streaming indicator — appears while is_streaming=true.
+ * Paired with the avatar's active-presence pulse. Soft, low-attention text
+ * so it doesn't compete with the avatar (which IS the focal authorship cue). */
+.streaming-indicator {
+  margin-top: var(--space-4);
+  font-size: var(--text-meta);
+  color: var(--text-muted);
+  font-style: italic;
+  padding-left: var(--space-2);
+}
+
+/* Empty session list placeholder */
+.session-item-empty {
+  padding: var(--space-3) var(--space-4);
+  font-size: var(--text-meta);
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+/* Offline phase pill — warns operator that backend init failed. */
+.phase-pill-warn {
+  color: #B14A3D !important;       /* muted brick, not alarming red */
+  border-color: rgba(177, 74, 61, 0.4) !important;
+}
+
+/* Disabled state for input + send while streaming */
+.input-textarea:disabled {
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
+.send-button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 /* ---- Input area ---- */

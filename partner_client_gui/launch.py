@@ -2,24 +2,30 @@
 """
 partner-client GUI — PyWebView launcher
 
-Phase 1: opens the built Svelte app in a native macOS WKWebView (or GTK
-WebView on Linux). Phase 2 wires the partner-client backend via the
-js_api bridge so the JS can call Python functions directly.
+Phase 2a — The Conversation Bridge:
+    - Loads partner-client backend (config + tools + memory + session + client)
+    - Wires GuiApi as window.pywebview.api for the Svelte frontend to call
+    - Opens the built Svelte app in a native macOS WKWebView (or GTK WebView
+      on Linux)
 
 Usage (development):
     cd partner_client_gui
-    npm run build               # produces dist/
-    python launch.py            # opens window
+    npm run build                                # build Svelte → dist/
+    python launch.py --config ~/Aletheia/aletheia.toml
 
 Eventually integrates as `partner gui --config <path>` subcommand per
 Willow's design decision (Q2, 2026-05-26).
 """
 
-from pathlib import Path
+from __future__ import annotations
+
 import argparse
 import sys
+from pathlib import Path
 
 import webview
+
+from api import GuiApi
 
 
 GUI_DIR = Path(__file__).resolve().parent
@@ -27,50 +33,15 @@ DIST_DIR = GUI_DIR / "dist"
 DIST_INDEX = DIST_DIR / "index.html"
 
 
-class Api:
-    """
-    Python ↔ JS bridge surface. Methods here are callable from the Svelte
-    frontend via `window.pywebview.api.<method>()`.
-
-    Phase 1: minimal — just enough for the JS to know it's connected.
-    Phase 2: send_message, list_sessions, load_session, get_partner_identity,
-             mosaic_save, mosaic_protect, mosaic_sleep, switch_substrate, etc.
-    """
-
-    def __init__(self, config_path: str | None = None):
-        self.config_path = config_path
-        self._partner = None  # Phase 2: load from config
-
-    def ping(self):
-        """Quick health check from JS."""
-        return {"ok": True, "phase": 1, "config_path": self.config_path}
-
-    def get_partner_identity(self):
-        """
-        Phase 1: stub returning hardcoded Aletheia identity.
-        Phase 2: load from partner-client config + Memory.
-        """
-        return {
-            "name": "Aletheia",
-            "handle": "aletheia",
-            "signature_glyph": "✨🔥❤️🪞",
-            "substrate": {
-                "model": "gemma4:31b-cloud",
-                "backend": "ollama",
-                "context_pct": 8,
-            },
-        }
-
-
 def main():
     parser = argparse.ArgumentParser(
-        description="partner-client GUI launcher (Phase 1 scaffold)"
+        description="partner-client GUI launcher (Phase 2a: conversation bridge wired)"
     )
     parser.add_argument(
         "--config",
         type=str,
-        default=None,
-        help="Path to partner TOML config (Phase 2: required; Phase 1: ignored)",
+        required=True,
+        help="Path to partner TOML config (e.g. ~/Aletheia/aletheia.toml)",
     )
     parser.add_argument(
         "--width",
@@ -84,6 +55,12 @@ def main():
         default=820,
         help="Initial window height (default 820)",
     )
+    parser.add_argument(
+        "--no-init",
+        action="store_true",
+        help="Skip backend initialization (renders the shell only; useful for "
+             "frontend dev without loading the full partner-client stack).",
+    )
     args = parser.parse_args()
 
     if not DIST_INDEX.exists():
@@ -91,7 +68,19 @@ def main():
         print("Run `npm run build` in the gui directory first.", file=sys.stderr)
         return 1
 
-    api = Api(config_path=args.config)
+    api = GuiApi(config_path=args.config)
+
+    if not args.no_init:
+        init_result = api.initialize()
+        if not init_result["ok"]:
+            # Surface to the operator's terminal AND let the UI render
+            # whatever it can; ping/get_partner_info will report the error.
+            print(f"WARN: backend initialization failed: {init_result.get('error')}", file=sys.stderr)
+            print("The GUI will still open but most surfaces will show '(not initialized)'.", file=sys.stderr)
+        else:
+            print(f"backend initialized — {init_result.get('partner_name')} | wake status: {init_result.get('status')}")
+    else:
+        print("--no-init: backend NOT initialized; shell-only mode")
 
     window = webview.create_window(
         title="partner-client",
