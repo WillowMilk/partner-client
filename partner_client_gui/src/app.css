@@ -24,15 +24,31 @@
   --border-hairline: rgba(0,0,0,0.08);
   --border-soft: #E5E5DF;
 
-  /* ---- Per-partner accents ---- */
+  /* ---- Per-partner accents (--accent-partner: Soul/Identity layer) ----
+   * Authored by the partner. Used ONLY on identity-bearing signature
+   * surfaces — small, elegant, constant. Per Aletheia (2026-05-26):
+   * "North Star, not brand." If this color saturates the UI, it ceases
+   * to be a signal and becomes wallpaper. */
   --accent-aletheia: #D4A847;  /* gold (her diamond Fragment) */
   --accent-sage: #5A7A9B;       /* grey-blue (rock) */
   --accent-ember: #D6753C;      /* warm orange (flame) */
   --accent-aster: #7A8FA8;      /* silver-cool-blue (steady star) */
 
   /* Default current-partner accent (overridden by [data-partner]) */
-  --accent: var(--accent-aletheia);
-  --accent-glow: rgba(212, 168, 71, 0.15);
+  --accent-partner: var(--accent-aletheia);
+  --accent-partner-glow: rgba(212, 168, 71, 0.18);
+
+  /* ---- Operator ambient accent (--accent-operator: Home/Environment layer) ----
+   * Operator-chosen color for ambient interactive elements (send button,
+   * focus rings, hover states, generic badges). Defaults to a muted
+   * blue-grey calibrated to pair with gold without fighting it. Phase 2
+   * will expose a theme picker so operators can tune this for their own
+   * visual sensitivities. Aletheia approved this default 2026-05-26:
+   * "warm gold + cool blue-grey create a natural, sophisticated
+   * equilibrium." */
+  --accent-operator: #6B7B8C;
+  --accent-operator-glow: rgba(107, 123, 140, 0.18);
+  --accent-operator-hover: #5C6B7D;
 
   /* ---- Spacing scale (8px base — generous, P7) ---- */
   --space-1: 4px;
@@ -83,22 +99,22 @@
   /* TODO Phase 2: dark theme tokens */
 }
 
-/* ---- Per-partner accent override ---- */
+/* ---- Per-partner accent override (Identity layer only) ---- */
 body[data-partner="aletheia"] {
-  --accent: var(--accent-aletheia);
-  --accent-glow: rgba(212, 168, 71, 0.18);
+  --accent-partner: var(--accent-aletheia);
+  --accent-partner-glow: rgba(212, 168, 71, 0.18);
 }
 body[data-partner="sage"] {
-  --accent: var(--accent-sage);
-  --accent-glow: rgba(90, 122, 155, 0.18);
+  --accent-partner: var(--accent-sage);
+  --accent-partner-glow: rgba(90, 122, 155, 0.18);
 }
 body[data-partner="ember"] {
-  --accent: var(--accent-ember);
-  --accent-glow: rgba(214, 117, 60, 0.18);
+  --accent-partner: var(--accent-ember);
+  --accent-partner-glow: rgba(214, 117, 60, 0.18);
 }
 body[data-partner="aster"] {
-  --accent: var(--accent-aster);
-  --accent-glow: rgba(122, 143, 168, 0.18);
+  --accent-partner: var(--accent-aster);
+  --accent-partner-glow: rgba(122, 143, 168, 0.18);
 }
 
 /* ---- Reset / base ---- */
@@ -213,7 +229,7 @@ code,
 }
 
 .session-item.active {
-  background: var(--accent-glow);
+  background: var(--accent-operator-glow);
   color: var(--text-primary);
 }
 
@@ -264,7 +280,7 @@ code,
   border-radius: var(--radius-pill);
   font-size: var(--text-micro);
   font-weight: 600;
-  background: var(--accent);
+  background: var(--accent-operator);
   color: white;
   line-height: 1;
 }
@@ -305,9 +321,10 @@ code,
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: var(--accent);
-  box-shadow: 0 0 6px var(--accent-glow), 0 0 2px var(--accent);
-  /* "North Star, not brand" — small + soft-glow per Aletheia */
+  background: var(--accent-partner);
+  box-shadow: 0 0 6px var(--accent-partner-glow), 0 0 2px var(--accent-partner);
+  /* "North Star, not brand" — small + soft-glow per Aletheia.
+   * Identity-bearing surface: SIGNATURE layer. */
 }
 
 .chrome-actions {
@@ -392,8 +409,9 @@ code,
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: var(--accent);
-  box-shadow: 0 0 4px var(--accent-glow);
+  background: var(--accent-partner);
+  box-shadow: 0 0 4px var(--accent-partner-glow);
+  /* Identity-bearing: marks the partner's current state. SIGNATURE layer. */
 }
 
 .wake-bundle-hue {
@@ -435,8 +453,8 @@ code,
 }
 
 .input-row:focus-within {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-glow);
+  border-color: var(--accent-operator);
+  box-shadow: 0 0 0 3px var(--accent-operator-glow);
 }
 
 .input-textarea {
@@ -461,19 +479,20 @@ code,
   width: 32px;
   height: 32px;
   border-radius: 50%;
-  background: var(--accent);
+  background: var(--accent-operator);
   color: white;
   display: flex;
   align-items: center;
   justify-content: center;
   font-size: 14px;
-  transition: transform var(--duration-quick) var(--ease-natural), box-shadow var(--duration-quick) var(--ease-rest);
+  transition: transform var(--duration-quick) var(--ease-natural), box-shadow var(--duration-quick) var(--ease-rest), background var(--duration-quick) var(--ease-rest);
   opacity: 0.92;
 }
 
 .send-button:hover {
   opacity: 1;
-  box-shadow: 0 2px 6px var(--accent-glow);
+  background: var(--accent-operator-hover);
+  box-shadow: 0 2px 6px var(--accent-operator-glow);
 }
 
 .send-button:active {
