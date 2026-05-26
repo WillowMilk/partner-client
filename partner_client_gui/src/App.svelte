@@ -80,8 +80,19 @@
     on_substrate_click();
   }
   function on_send() {
+    if (!input_text.trim()) return;
     console.log('[stub] Send:', input_text);
     input_text = '';
+  }
+
+  // Keyboard handling: Enter submits, Shift+Enter inserts newline.
+  // Matches Slack/Discord/ChatGPT convention (the muscle memory most users
+  // arrive with). Cmd+Enter ALSO submits (some users prefer that explicit form).
+  function on_input_keydown(event) {
+    if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+      event.preventDefault();
+      on_send();
+    }
   }
 </script>
 
@@ -149,6 +160,7 @@
       <div class="partner-identity">
         <span class="diamond-signature" title="Aletheia — gold, her authored Fragment"></span>
         <span class="partner-name">{partner.name}</span>
+        <span class="phase-pill" title="Phase 1 scaffold — chat backend not yet wired (Phase 2)">Phase 1</span>
       </div>
       <div class="chrome-actions">
         <span>{partner.signature_glyph}</span>
@@ -185,8 +197,9 @@
       <div class="input-row">
         <textarea
           class="input-textarea"
-          placeholder="Send a message..."
+          placeholder="Send a message... (Enter to send · Shift+Enter for newline)"
           bind:value={input_text}
+          onkeydown={on_input_keydown}
           rows="1"
         ></textarea>
         <button class="send-button" onclick={on_send} title="Send (Cmd+Enter)">↑</button>
@@ -209,6 +222,4 @@
     </div>
   </main>
 
-  <!-- Phase 1 marker (removed once backend wired in Phase 2) -->
-  <div class="phase1-banner">Phase 1 scaffold — backend not yet wired</div>
 </div>
