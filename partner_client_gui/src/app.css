@@ -692,7 +692,20 @@ code,
   line-height: var(--line-height-body);
   color: var(--text-primary);
   min-height: 24px;
-  max-height: 200px;
+  /* Auto-expand: grow vertically as the user types multi-line content,
+   * capping at ~10 lines before falling back to internal scroll. Matches
+   * the Claude Desktop / ChatGPT pattern Willow is used to.
+   *
+   * Two-layer implementation:
+   *   1. `field-sizing: content` — modern CSS that auto-sizes form fields
+   *      to their content. Supported in WKWebView (Safari 17+) which is
+   *      what PyWebView uses on macOS 14+.
+   *   2. JS fallback in App.svelte resets height to 'auto' then sets it
+   *      to scrollHeight — works in older WebKit/GTK too, AND ensures the
+   *      box SHRINKS back when text is deleted (not just expands). */
+  field-sizing: content;
+  max-height: 240px;
+  overflow-y: auto;
 }
 
 .input-textarea::placeholder {

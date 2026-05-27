@@ -63,6 +63,27 @@
   // Ref to .chat-area for auto-scroll-to-bottom behavior.
   let chat_area_el = $state(null);
 
+  // Ref to the input textarea for auto-expand-on-multiline behavior.
+  // Matches Claude Desktop / ChatGPT pattern — the box grows vertically
+  // as you type multiple lines, up to a max-height (then internal scroll).
+  let input_textarea_el = $state(null);
+
+  // Auto-expand the textarea on text change. CSS `field-sizing: content`
+  // handles this natively in modern WebKit/Chromium (Safari 17+, the WKWebView
+  // on PyWebView/macOS), but we add a JS fallback for older WebViews + an
+  // explicit reset-then-measure pattern so the box ALSO shrinks back down
+  // when text is deleted.
+  $effect(() => {
+    const _t = input_text;  // track reactivity
+    if (input_textarea_el) {
+      // Reset to single-row first so scrollHeight reflects the actual content,
+      // not the previous larger size.
+      input_textarea_el.style.height = 'auto';
+      // Then grow to fit content (CSS max-height caps it at ~10 lines).
+      input_textarea_el.style.height = input_textarea_el.scrollHeight + 'px';
+    }
+  });
+
   // Auto-scroll: whenever messages grow OR the streaming indicator appears,
   // ride the bottom. Done in $effect so it re-fires reactively. The
   // requestAnimationFrame defer ensures DOM has rendered the new content
@@ -390,6 +411,7 @@
           class="input-textarea"
           placeholder={is_streaming ? `Waiting for ${partner.name}…` : 'Send a message... (Enter to send · Shift+Enter for newline)'}
           bind:value={input_text}
+          bind:this={input_textarea_el}
           onkeydown={on_input_keydown}
           rows="1"
           disabled={is_streaming}
