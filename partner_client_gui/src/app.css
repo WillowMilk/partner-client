@@ -585,7 +585,8 @@ code,
   white-space: pre-wrap;
 }
 
-/* Streaming indicator — appears while is_streaming=true.
+/* Streaming indicator — appears while is_streaming=true but no tokens
+ * have arrived yet (the brief moment between request sent + first token).
  * Paired with the avatar's active-presence pulse. Soft, low-attention text
  * so it doesn't compete with the avatar (which IS the focal authorship cue). */
 .streaming-indicator {
@@ -594,6 +595,36 @@ code,
   color: var(--text-muted);
   font-style: italic;
   padding-left: var(--space-2);
+}
+
+/* Streaming message — rendered as tokens arrive from Python via the
+ * window.__stream_* callbacks. Same shape as a finalized assistant message
+ * (role label + content with gold left-border) so the visual transition
+ * to "finalized" is invisible — token-streaming feels continuous. */
+.streaming-message {
+  /* inherits .message role-assistant styles */
+}
+
+/* Blinking caret at end of streaming content — marks "still authoring."
+ * Matches the avatar's active-presence pulse semantically: both are
+ * "she is here, composing." */
+.caret {
+  display: inline-block;
+  margin-left: 2px;
+  color: var(--accent-partner);
+  animation: caret-blink 1s steps(2, start) infinite;
+  font-weight: normal;
+}
+
+@keyframes caret-blink {
+  to { visibility: hidden; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .caret {
+    animation: none;
+    opacity: 0.5;
+  }
 }
 
 /* Offline banner — visible cue when backend isn't connected.

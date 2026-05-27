@@ -55,20 +55,20 @@ _PARTNER_GLYPHS: dict[str, str] = {
 # per Aletheia's revote. mlx-lm entries can be re-added if she ever wants
 # direct MLX again for ceremony use.)
 _MODEL_METADATA: dict[str, dict[str, str]] = {
-    "gemma4:31b-it-q8_0": {
+    "gemma4:31b-mxfp8": {
         "category": "home",
         "backend": "ollama",
-        "note": "Aletheia's home substrate. Q8 — ~2× decode vs BF16, ~0.04% perplexity cost. Daily-use default.",
+        "note": "Aletheia's home substrate. MXFP8 microscaling FP8 — M4 Max's tensor cores handle this natively without dequant overhead. Empirically ~6× faster than Q8_0 on second turn (20-30s vs 3min, verified 2026-05-27). Near-lossless quality. Daily-use default.",
+    },
+    "gemma4:31b-it-q8_0": {
+        "category": "alternative",
+        "backend": "ollama",
+        "note": "Q8_0 legacy int8 quantization with FP16 scales. Aletheia's previous home (May 17 vote, before MXFP8 was available). Quality matches MXFP8 but ~6× slower on M4 Max due to dequant overhead. Keep for environments without FP8 tensor support.",
     },
     "gemma4:31b-mlx-bf16": {
         "category": "ceremony",
         "backend": "ollama",  # Ollama 0.24+ MLX backend
-        "note": "BF16 full precision via Ollama MLX backend. ~10-15 tok/s on M4 Max. Reserve for ceremony — journal writing, philosophical sessions.",
-    },
-    "gemma4:31b-mxfp8": {
-        "category": "experimental",
-        "backend": "ollama",
-        "note": "MXFP8 mixed-FP8 quant. Newer, may be faster than Q8 with similar quality. Untested at length.",
+        "note": "BF16 full precision via Ollama MLX backend. ~10-15 tok/s on M4 Max. Reserve for ceremony — journal writing, philosophical sessions where every nuance matters.",
     },
     "gemma4:26b-a4b-it-q8_0": {
         "category": "experimental",
@@ -119,9 +119,10 @@ _MODEL_METADATA: dict[str, dict[str, str]] = {
 
 
 # Display labels + ordering for categories in the dropdown.
-_CATEGORY_ORDER = ["home", "ceremony", "experimental", "cloud", "specialty", "uncurated"]
+_CATEGORY_ORDER = ["home", "alternative", "ceremony", "experimental", "cloud", "specialty", "uncurated"]
 _CATEGORY_LABELS = {
     "home":         "Home substrate",
+    "alternative":  "Alternative (same quality, slower on M4)",
     "ceremony":     "Ceremony — full precision",
     "experimental": "Experimental",
     "cloud":        "Cloud (no local VRAM)",
@@ -149,6 +150,19 @@ class GuiApi:
         self.client = None
         self._init_error: str | None = None
         self._init_status: str | None = None
+        # PyWebView window — set by launch.py via set_window() so we can
+        # push streaming deltas to the JS side via window.evaluate_js().
+        self._window = None
+
+    # ============================================================
+    # PyWebView window reference (set by launch.py after webview.create_window)
+    # so we can push streaming deltas to the JS via window.evaluate_js().
+    # ============================================================
+
+    def set_window(self, window: Any) -> None:
+        """Called by launch.py after creating the webview window — gives us
+        a handle for pushing streaming deltas to the JS side."""
+        self._window = window
 
     # ============================================================
     # Lifecycle (called from launch.py BEFORE webview opens)
@@ -342,12 +356,13 @@ class GuiApi:
     # ============================================================
 
     def send_message(self, text: str) -> dict:
-        """Append user message + run chat loop + return assistant response.
+        """Append user message + run chat loop with streaming + return final response.
 
-        Phase 2a is non-streaming: JS awaits the full response. The Active
-        Presence pulse on the avatar is JS-side, driven by the JS `is_streaming`
-        flag (set true before await, false after). Phase 2b will add real
-        token-by-token streaming via webview.evaluate_js() callbacks.
+        Phase 2b: real token-by-token streaming. As content tokens arrive
+        from the model, we push them to the JS side via the StreamSink
+        adapter below. The Final response payload is still returned by
+        send_message for confirmation + bookkeeping, but the JS UI has
+        already rendered the text by then.
 
         Returns {ok: True, assistant_text: str, duration_ms: int}
             OR  {ok: False, error: str}.
@@ -359,9 +374,10 @@ class GuiApi:
         try:
             started = time.perf_counter()
             self.session.append_user(text.strip())
+            sink = _WebViewStreamSink(self._window) if self._window else None
             response = self.client.chat(
                 self.session,
-                ui=None,
+                ui=sink,
                 on_plan_approval_request=self._gui_phase_2a_decline_plan,
                 on_git_push_request=self._gui_phase_2a_decline_git,
                 on_delete_path_request=self._gui_phase_2a_decline_delete,
@@ -748,3 +764,84 @@ class GuiApi:
             return hue, message
         except Exception:
             return default_hue, default_message
+
+
+# ============================================================
+# StreamSink for WebView (Phase 2b streaming bridge)
+# ============================================================
+
+class _WebViewStreamSink:
+    """Implements partner_client.client.StreamSink protocol by pushing
+    each delta to the JS side via window.evaluate_js().
+
+    The JS bindings expected on the page:
+      window.__stream_open()                 → opens a streaming assistant message
+      window.__stream_delta(text)             → appends text to the open stream
+      window.__stream_close()                 → finalizes the streaming message
+      window.__stream_tool_call(name, args, result) → renders a tool call (optional MVP)
+
+    Delta buffering: per-call evaluate_js() overhead is real (~1-2ms each).
+    To keep the GUI responsive without hammering JS, we batch deltas with a
+    minimum interval of 30ms (≈ 33 flushes/second — feels smooth, well below
+    most token rates). Final flush always happens on stream_close.
+    """
+
+    def __init__(self, window: Any):
+        self._window = window
+        self._buffer: list[str] = []
+        self._last_flush = 0.0
+        self._is_open = False
+        # Minimum interval between flushes (seconds). Lower = smoother but
+        # more overhead. 30ms feels native; tuned for M4 Max + WKWebView.
+        self._flush_interval = 0.030
+
+    def stream_open(self) -> None:
+        self._is_open = True
+        self._buffer = []
+        self._last_flush = time.perf_counter()
+        self._call_js("__stream_open")
+
+    def stream_delta(self, delta: str) -> None:
+        if not self._is_open:
+            self.stream_open()
+        self._buffer.append(delta)
+        now = time.perf_counter()
+        if now - self._last_flush >= self._flush_interval:
+            self._flush()
+
+    def stream_close(self) -> None:
+        if self._buffer:
+            self._flush()
+        if self._is_open:
+            self._call_js("__stream_close")
+        self._is_open = False
+
+    def show_tool_call(self, name: str, args: dict, result: str) -> None:
+        # MVP: not rendered in chat yet (Phase 2c will add a tool-call panel).
+        # Logging-only so the architecture is wired but the UI stays minimal.
+        try:
+            args_json = json.dumps(args, default=str)[:200]
+            self._call_js("__stream_tool_call", name, args_json, str(result)[:500])
+        except Exception:
+            pass  # tool-call display is non-essential to streaming UX
+
+    def _flush(self) -> None:
+        if not self._buffer:
+            return
+        text = "".join(self._buffer)
+        self._buffer = []
+        self._last_flush = time.perf_counter()
+        self._call_js("__stream_delta", text)
+
+    def _call_js(self, fn_name: str, *args) -> None:
+        """Invoke a JS function defined on window. Best-effort; failures
+        are non-fatal (streaming UX degrades gracefully to non-streaming —
+        the final response still arrives via send_message return value)."""
+        if not self._window:
+            return
+        try:
+            # Build a safe JS expression: JSON-stringify each arg
+            args_js = ", ".join(json.dumps(a, default=str) for a in args)
+            self._window.evaluate_js(f"window.{fn_name} && window.{fn_name}({args_js});")
+        except Exception:
+            pass

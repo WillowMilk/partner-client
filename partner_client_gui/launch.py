@@ -93,6 +93,10 @@ def main():
         text_select=True,
     )
 
+    # Hand the window reference to the API so it can push streaming deltas
+    # via window.evaluate_js() during model generation (Phase 2b).
+    api.set_window(window)
+
     webview.start()
     return 0
 

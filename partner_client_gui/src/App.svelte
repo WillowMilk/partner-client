@@ -67,6 +67,12 @@
   let switch_in_progress = $state(false);
   let switch_result = $state(null);     // {ok, message, error} after switch completes
 
+  // Streaming (Phase 2b-2) state — currently-open streaming assistant message.
+  // While non-null, content arrives token-by-token from Python via the
+  // window.__stream_* callbacks. When the stream closes, this message is
+  // committed to the messages array.
+  let streaming_message = $state(null);  // {content: ""} while open, null when closed
+
   // Ref to .chat-area for auto-scroll-to-bottom behavior.
   let chat_area_el = $state(null);
 
@@ -97,8 +103,11 @@
   // before we measure scrollHeight.
   $effect(() => {
     // Track the reactive deps explicitly so Svelte 5 picks them up.
+    // Also tracks streaming_message.content so the auto-scroll rides
+    // the bottom as tokens stream in token-by-token.
     const _len = messages.length;
     const _streaming = is_streaming;
+    const _stream_content = streaming_message?.content;
     if (chat_area_el) {
       requestAnimationFrame(() => {
         chat_area_el.scrollTo({
@@ -154,7 +163,42 @@
     });
   }
 
+  // ===========================================================
+  // Streaming callbacks (called from Python via window.evaluate_js)
+  //
+  // Bound globally on window so the PyWebView bridge can invoke them
+  // from the _WebViewStreamSink class in api.py.
+  // ===========================================================
+
+  function _install_stream_callbacks() {
+    window.__stream_open = () => {
+      streaming_message = { content: '' };
+    };
+    window.__stream_delta = (text) => {
+      if (!streaming_message) {
+        streaming_message = { content: text };
+      } else {
+        // Svelte 5: re-assign to trigger reactivity
+        streaming_message = { content: streaming_message.content + text };
+      }
+    };
+    window.__stream_close = () => {
+      if (streaming_message && streaming_message.content) {
+        messages = [...messages, {
+          role: 'assistant',
+          content: streaming_message.content,
+        }];
+      }
+      streaming_message = null;
+    };
+    window.__stream_tool_call = (name, args_json, result) => {
+      // MVP: log only. Phase 2c will render tool calls inline.
+      console.log('[tool]', name, args_json, result?.slice?.(0, 100));
+    };
+  }
+
   onMount(async () => {
+    _install_stream_callbacks();
     const api = await wait_for_api();
     if (!api) {
       backend_connected = false;
@@ -219,13 +263,32 @@
     is_streaming = true;
     try {
       const result = await window.pywebview.api.send_message(text);
-      if (result.ok) {
-        messages = [...messages, { role: 'assistant', content: result.assistant_text }];
-      } else {
+      // Streaming path: __stream_close already committed the assistant message
+      // to `messages`. We only append a fallback bubble if streaming didn't
+      // happen (e.g. error before any tokens) OR if there was an error.
+      if (!result.ok) {
+        // Discard any partial streamed text on error
+        streaming_message = null;
         messages = [...messages, {
           role: 'assistant',
           content: `(Error: ${result.error})`,
         }];
+      } else if (streaming_message) {
+        // Stream was open but never closed (rare — defensive fallback)
+        messages = [...messages, {
+          role: 'assistant',
+          content: streaming_message.content || result.assistant_text || '',
+        }];
+        streaming_message = null;
+      } else {
+        // Last-resort: streaming didn't fire at all but response is OK.
+        // Use the final text returned by the API (matches Phase 2a behavior).
+        const already_appended = messages.length > 0 &&
+                                  messages[messages.length - 1].role === 'assistant' &&
+                                  messages[messages.length - 1].content === result.assistant_text;
+        if (!already_appended && result.assistant_text) {
+          messages = [...messages, { role: 'assistant', content: result.assistant_text }];
+        }
       }
       // Refresh substrate context_pct after a turn (it grows)
       try {
@@ -233,6 +296,7 @@
         partner = refresh;
       } catch (_) { /* non-fatal */ }
     } catch (e) {
+      streaming_message = null;
       messages = [...messages, {
         role: 'assistant',
         content: `(Connection error: ${e.message || e})`,
@@ -513,13 +577,20 @@
         </div>
       {/each}
 
-      {#if messages.length === 0}
+      {#if streaming_message}
+        <div class="message role-assistant streaming-message">
+          <div class="message-role">{partner.name}</div>
+          <div class="message-content">{streaming_message.content}<span class="caret">▍</span></div>
+        </div>
+      {/if}
+
+      {#if messages.length === 0 && !streaming_message}
         <div class="empty-chat-prompt">
           The bench is open. Say something — or just sit a moment first.
         </div>
       {/if}
 
-      {#if is_streaming}
+      {#if is_streaming && !streaming_message}
         <div class="streaming-indicator">
           {partner.name} is here…
         </div>
