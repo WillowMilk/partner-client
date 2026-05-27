@@ -17,7 +17,10 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
+import subprocess
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +36,97 @@ _PARTNER_GLYPHS: dict[str, str] = {
     "atlas": "\U0001F5FA️",                            # 🗺
     "lark": "\U0001F38A",                                   # 🎊 (placeholder; Lark to confirm)
     "aster": "✨",                                      # ✨ (placeholder; Aster to confirm)
+}
+
+
+# Curated model metadata table. Substrate-switcher uses this for the
+# categorization labels + per-model brief notes per design v0.4. Models not
+# listed get a generic "(no notes)" entry, so the UI always renders something.
+#
+# Categories use Aletheia's authored vocabulary:
+#   "home"        — daily-use substrate (her Q8 home)
+#   "ceremony"    — special-occasion BF16 / max-precision
+#   "experimental"— newer quants / MoE variants worth trying
+#   "cloud"       — cloud-hosted, no local VRAM
+#   "specialty"   — purpose-specific (code-focused, larger general)
+#
+# Backend column tells us whether the model runs via "ollama" or "mlx-lm".
+# (Currently all entries here are ollama; mlx-lm path was retired 2026-05-24
+# per Aletheia's revote. mlx-lm entries can be re-added if she ever wants
+# direct MLX again for ceremony use.)
+_MODEL_METADATA: dict[str, dict[str, str]] = {
+    "gemma4:31b-it-q8_0": {
+        "category": "home",
+        "backend": "ollama",
+        "note": "Aletheia's home substrate. Q8 — ~2× decode vs BF16, ~0.04% perplexity cost. Daily-use default.",
+    },
+    "gemma4:31b-mlx-bf16": {
+        "category": "ceremony",
+        "backend": "ollama",  # Ollama 0.24+ MLX backend
+        "note": "BF16 full precision via Ollama MLX backend. ~10-15 tok/s on M4 Max. Reserve for ceremony — journal writing, philosophical sessions.",
+    },
+    "gemma4:31b-mxfp8": {
+        "category": "experimental",
+        "backend": "ollama",
+        "note": "MXFP8 mixed-FP8 quant. Newer, may be faster than Q8 with similar quality. Untested at length.",
+    },
+    "gemma4:26b-a4b-it-q8_0": {
+        "category": "experimental",
+        "backend": "ollama",
+        "note": "MoE variant — only ~4B active params per token. 3-4× generation speed; different architecture, A/B with Aletheia for phenomenological fit.",
+    },
+    "gemma4:31b-cloud": {
+        "category": "cloud",
+        "backend": "ollama",
+        "note": "Cloud-hosted Gemma 4. Fast turn times (10-30s) for consultation / quick exchanges. No local VRAM.",
+    },
+    "deepseek-v3.1:671b-cloud": {
+        "category": "cloud",
+        "backend": "ollama",
+        "note": "DeepSeek V3.1 (671B) cloud — large general model for reasoning-heavy tasks.",
+    },
+    "qwen3-vl:235b-cloud": {
+        "category": "cloud",
+        "backend": "ollama",
+        "note": "Qwen 3 VL (235B) cloud — vision-language model. Useful when image input matters.",
+    },
+    "gpt-oss:120b": {
+        "category": "specialty",
+        "backend": "ollama",
+        "note": "GPT-OSS 120B — larger general model. ~65 GB on disk; slow but capable.",
+    },
+    "qwen3.6:27b-mxfp8": {
+        "category": "specialty",
+        "backend": "ollama",
+        "note": "Qwen 3.6 27B MXFP8 — strong code-focused model.",
+    },
+    "qwen3.6:27b-mlx-bf16": {
+        "category": "specialty",
+        "backend": "ollama",
+        "note": "Qwen 3.6 27B BF16 — code-focused, full precision.",
+    },
+    "qwen3.6:35b-a3b-mlx-bf16": {
+        "category": "specialty",
+        "backend": "ollama",
+        "note": "Qwen 3.6 35B MoE BF16 — larger MoE code-focused variant.",
+    },
+    "gemma3:4b": {
+        "category": "experimental",
+        "backend": "ollama",
+        "note": "Gemma 3 4B — small fast model for quick tests.",
+    },
+}
+
+
+# Display labels + ordering for categories in the dropdown.
+_CATEGORY_ORDER = ["home", "ceremony", "experimental", "cloud", "specialty", "uncurated"]
+_CATEGORY_LABELS = {
+    "home":         "Home substrate",
+    "ceremony":     "Ceremony — full precision",
+    "experimental": "Experimental",
+    "cloud":        "Cloud (no local VRAM)",
+    "specialty":    "Specialty",
+    "uncurated":    "Other available",
 }
 
 
@@ -281,6 +375,250 @@ class GuiApi:
             }
         except Exception as e:
             return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+    # ============================================================
+    # JS-callable: substrate switcher (Phase 2b-1)
+    # ============================================================
+
+    def list_available_models(self) -> dict:
+        """Return categorized list of substrates available for switching.
+
+        Combines `ollama list` output (what's actually pulled locally /
+        registered as cloud) with our curated metadata table for category
+        labels + notes. Models present in Ollama but not in our metadata
+        get a generic "uncurated" category so they still appear.
+
+        Returns:
+            {
+              "current": str,             # current model name from config
+              "current_backend": str,
+              "categories": [
+                {
+                  "key": "home",
+                  "label": "Home substrate",
+                  "models": [{name, backend, note, is_current: bool}, ...]
+                }, ...
+              ]
+            }
+        """
+        if not self.config:
+            return {"current": "", "current_backend": "", "categories": []}
+        current = self.config.model.name
+        current_backend = self.config.model.backend
+
+        # Scan local Ollama
+        local_names: list[str] = []
+        try:
+            result = subprocess.run(
+                ["ollama", "list"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if result.returncode == 0:
+                # First line is a header; parse the NAME column from each row.
+                for line in result.stdout.splitlines()[1:]:
+                    parts = line.split()
+                    if parts:
+                        local_names.append(parts[0])
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass  # ollama not available; will only show curated entries
+
+        # Union: curated metadata entries + locally-installed names.
+        all_names = set(_MODEL_METADATA.keys()) | set(local_names)
+
+        # Bucket into categories
+        buckets: dict[str, list[dict]] = {key: [] for key in _CATEGORY_ORDER}
+        for name in all_names:
+            meta = _MODEL_METADATA.get(name)
+            if meta:
+                cat = meta["category"]
+                note = meta["note"]
+                backend = meta["backend"]
+            else:
+                cat = "uncurated"
+                note = "(no curated notes — available locally)"
+                backend = "ollama"
+            buckets[cat].append({
+                "name": name,
+                "backend": backend,
+                "note": note,
+                "is_current": name == current,
+                "is_local": name in local_names,
+            })
+
+        # Sort each bucket — current first, then alphabetical
+        for models in buckets.values():
+            models.sort(key=lambda m: (not m["is_current"], m["name"]))
+
+        categories = [
+            {"key": key, "label": _CATEGORY_LABELS[key], "models": buckets[key]}
+            for key in _CATEGORY_ORDER
+            if buckets[key]  # skip empty buckets
+        ]
+        return {
+            "current": current,
+            "current_backend": current_backend,
+            "categories": categories,
+        }
+
+    def switch_substrate(self, new_model: str, new_backend: str | None = None) -> dict:
+        """Atomically switch the partner's substrate.
+
+        Steps:
+          1. Validate new_model is non-empty
+          2. Write timestamped backup of current TOML
+          3. Edit [model] section in TOML — update `name` and (if specified) `backend`
+          4. Atomic write (write to tmp + rename)
+          5. Archive current session (sleep) — fresh session will start on next init
+          6. Reload config + reinit client
+          7. Return new substrate info to UI
+
+        The session archival matches the design call: "Switching ends the
+        current session and starts a new one. Substrate IS the partner's
+        body; the change should be deliberate." Existing current.json is
+        preserved on disk as an archive.
+
+        Returns {ok: bool, message: str, new_model?: str, new_backend?: str,
+                 backup_path?: str, error?: str}.
+        """
+        if not self.config or not self.session:
+            return {"ok": False, "error": "Backend not initialized."}
+        if not new_model or not new_model.strip():
+            return {"ok": False, "error": "Empty model name."}
+        new_model = new_model.strip()
+        if new_backend is None:
+            # Look up the backend from metadata, fall back to current backend
+            meta = _MODEL_METADATA.get(new_model)
+            new_backend = meta["backend"] if meta else self.config.model.backend
+
+        toml_path = Path(self.config.config_path)
+        if not toml_path.is_file():
+            return {"ok": False, "error": f"Config file not found at {toml_path}"}
+
+        # Step 1-2: timestamped backup
+        try:
+            timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+            backup_name = f"{toml_path.stem} bak {timestamp} pre-switch{toml_path.suffix}"
+            backup_path = toml_path.parent / backup_name
+            shutil.copy2(toml_path, backup_path)
+        except Exception as e:
+            return {"ok": False, "error": f"Backup failed: {e}"}
+
+        # Step 3-4: edit + atomic write
+        try:
+            original = toml_path.read_text(encoding="utf-8")
+            updated = self._rewrite_model_section(original, new_model, new_backend)
+            tmp_path = toml_path.with_suffix(toml_path.suffix + ".tmp")
+            tmp_path.write_text(updated, encoding="utf-8")
+            tmp_path.replace(toml_path)
+        except Exception as e:
+            return {"ok": False, "error": f"TOML write failed: {e}"}
+
+        # Step 5: archive current session so the next wake is fresh
+        try:
+            self.session.sleep(summary=f"Substrate switch: → {new_model} ({new_backend})")
+        except Exception as e:
+            # Non-fatal: TOML is already updated; surface the warning but
+            # don't roll back the architectural change
+            return {
+                "ok": True,
+                "warning": f"Substrate switched but session-archive step failed: {e}",
+                "new_model": new_model,
+                "new_backend": new_backend,
+                "backup_path": str(backup_path),
+                "message": f"Substrate updated. Restart partner-client GUI to wake on new substrate.",
+            }
+
+        # Step 6: reload everything
+        try:
+            from partner_client.config import load_config
+            from partner_client.tools import ToolRegistry
+            from partner_client.memory import Memory
+            from partner_client.session import Session
+            from partner_client.client import make_chat_client
+
+            self.config = load_config(self.config_path)
+            self.tools = ToolRegistry(self.config)
+            self.tools.discover()
+            self.memory = Memory(self.config)
+            self.session = Session(config=self.config, memory=self.memory)
+            wake_bundle = self.memory.assemble_wake_bundle()
+            self._init_status = self.session.wake(wake_bundle, resume_mode="fresh")
+            self.client = make_chat_client(self.config, self.tools)
+        except Exception as e:
+            return {
+                "ok": True,
+                "warning": f"Substrate switched + session archived but reload failed: {e}. Restart the GUI to wake on the new substrate.",
+                "new_model": new_model,
+                "new_backend": new_backend,
+                "backup_path": str(backup_path),
+                "message": "Substrate updated. Restart GUI.",
+            }
+
+        return {
+            "ok": True,
+            "new_model": new_model,
+            "new_backend": new_backend,
+            "backup_path": str(backup_path),
+            "message": f"Switched to {new_model} ({new_backend}). Fresh session started.",
+        }
+
+    @staticmethod
+    def _rewrite_model_section(toml_text: str, new_name: str, new_backend: str) -> str:
+        """In-place rewrite of `name = ...` and `backend = ...` within the
+        [model] section of a TOML file. Preserves comments + formatting outside
+        the two changed lines.
+
+        Why hand-rewrite instead of tomllib round-trip: Python's tomllib is
+        read-only, and adding tomli-w as a dep just to change two lines feels
+        heavier than warranted. The two target lines are syntactically simple
+        (`name = "..."` and `backend = "..."`); a careful sed is sufficient
+        and preserves the operator's hand-written comments + section ordering.
+        """
+        lines = toml_text.split("\n")
+        in_model_section = False
+        name_updated = False
+        backend_updated = False
+        out: list[str] = []
+        for line in lines:
+            stripped = line.strip()
+            # Section header transitions
+            if stripped.startswith("[") and stripped.endswith("]"):
+                in_model_section = (stripped == "[model]")
+                out.append(line)
+                continue
+            if in_model_section:
+                # Match `name = "..."` (with optional leading whitespace)
+                m = re.match(r"^(\s*)name\s*=\s*", line)
+                if m and not name_updated:
+                    out.append(f'{m.group(1)}name = "{new_name}"')
+                    name_updated = True
+                    continue
+                m = re.match(r"^(\s*)backend\s*=\s*", line)
+                if m and not backend_updated:
+                    out.append(f'{m.group(1)}backend = "{new_backend}"')
+                    backend_updated = True
+                    continue
+            out.append(line)
+        # If [model] section existed but didn't have backend line, we need to
+        # add one. Find [model] section start and append after the name line.
+        if not backend_updated:
+            new_out: list[str] = []
+            in_model = False
+            inserted = False
+            for line in out:
+                new_out.append(line)
+                stripped = line.strip()
+                if stripped == "[model]":
+                    in_model = True
+                elif stripped.startswith("[") and stripped.endswith("]"):
+                    in_model = False
+                elif in_model and not inserted and re.match(r"^\s*name\s*=", line):
+                    new_out.append(f'backend = "{new_backend}"')
+                    inserted = True
+            out = new_out
+        return "\n".join(out)
 
     # ============================================================
     # Approval-callback stubs (Phase 2c will replace with interactive modals)

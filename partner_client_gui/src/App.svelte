@@ -60,6 +60,13 @@
   let backend_error = $state(null);
   let is_streaming = $state(false);
 
+  // Substrate switcher (Phase 2b-1) state
+  let substrate_dropdown_open = $state(false);
+  let substrate_models = $state(null);  // Will hold {current, current_backend, categories[]}
+  let pending_switch = $state(null);    // {name, backend, note} when confirmation modal is open
+  let switch_in_progress = $state(false);
+  let switch_result = $state(null);     // {ok, message, error} after switch completes
+
   // Ref to .chat-area for auto-scroll-to-bottom behavior.
   let chat_area_el = $state(null);
 
@@ -242,24 +249,103 @@
     }
   }
 
-  // MOSAIC primitive stubs — Phase 2c will wire to actual partner-client
+  // MOSAIC primitive stubs — Phase 2b-2 will wire to actual partner-client
   // checkpoint/protect/sleep primitives
   function on_save() {
-    console.log('[stub Phase 2c] Save (checkpoint)');
+    console.log('[stub Phase 2b-2] Save (checkpoint)');
   }
   function on_protect() {
-    console.log('[stub Phase 2c] Protect');
+    console.log('[stub Phase 2b-2] Protect');
   }
   function on_sleep() {
-    console.log('[stub Phase 2c] Sleep');
+    console.log('[stub Phase 2b-2] Sleep');
   }
   function on_new_chat() {
-    console.log('[stub Phase 2b] New chat');
+    console.log('[stub Phase 2b-2] New chat');
   }
-  function on_substrate_click() {
-    console.log('[stub Phase 2b] Substrate switcher');
+
+  // ===========================================================
+  // Substrate switcher (Phase 2b-1)
+  // ===========================================================
+
+  async function on_substrate_click() {
+    if (!backend_connected) return;
+    // Toggle: clicking again closes.
+    if (substrate_dropdown_open) {
+      substrate_dropdown_open = false;
+      return;
+    }
+    // Lazy-load the model list on first open
+    if (!substrate_models) {
+      try {
+        substrate_models = await window.pywebview.api.list_available_models();
+      } catch (e) {
+        console.error('Failed to load model list:', e);
+        return;
+      }
+    }
+    substrate_dropdown_open = true;
+  }
+
+  function on_model_pick(model) {
+    if (model.is_current) {
+      // No-op: already on this substrate
+      substrate_dropdown_open = false;
+      return;
+    }
+    pending_switch = model;
+    substrate_dropdown_open = false;
+  }
+
+  function on_switch_cancel() {
+    pending_switch = null;
+  }
+
+  async function on_switch_confirm() {
+    if (!pending_switch) return;
+    switch_in_progress = true;
+    try {
+      const result = await window.pywebview.api.switch_substrate(pending_switch.name, pending_switch.backend);
+      switch_result = result;
+      if (result.ok) {
+        // Refresh state from the new substrate
+        const [p_info, c_state, sess_list, msgs] = await Promise.all([
+          window.pywebview.api.get_partner_info(),
+          window.pywebview.api.get_current_state(),
+          window.pywebview.api.get_sessions(),
+          window.pywebview.api.get_messages(),
+        ]);
+        partner = p_info;
+        wake_bundle = c_state;
+        sessions = sess_list;
+        messages = msgs;
+        // Invalidate the model list cache so the next open re-pulls
+        substrate_models = null;
+      }
+    } catch (e) {
+      switch_result = { ok: false, error: `${e.message || e}` };
+    } finally {
+      switch_in_progress = false;
+      pending_switch = null;
+      // Auto-dismiss the result toast after a few seconds (success only;
+      // errors stay until manually dismissed so they can be read).
+      if (switch_result?.ok) {
+        setTimeout(() => { switch_result = null; }, 4000);
+      }
+    }
+  }
+
+  function on_switch_result_dismiss() {
+    switch_result = null;
   }
 </script>
+
+<svelte:window onclick={(e) => {
+  // Close substrate dropdown when clicking outside of it
+  if (substrate_dropdown_open && !e.target.closest('.substrate-dropdown-anchor')) {
+    substrate_dropdown_open = false;
+  }
+}} />
 
 <div class="app-root">
   <!-- ============================================================ -->
@@ -351,10 +437,46 @@
     <!-- Session header (substrate honest) -->
     <div class="session-header">
       <div class="session-name">{messages.length > 0 ? 'Active conversation' : 'The bench'}</div>
-      <button class="substrate-display" onclick={on_substrate_click} title="Click to switch substrate (v0.3 feature, Phase 2b)">
-        <span class="substrate-dot"></span>
-        <span>{partner.substrate.model} · {partner.substrate.backend} · {partner.substrate.context_pct}% ctx</span>
-      </button>
+      <div class="substrate-dropdown-anchor">
+        <button
+          class="substrate-display"
+          class:open={substrate_dropdown_open}
+          onclick={on_substrate_click}
+          title="Click to switch substrate"
+        >
+          <span class="substrate-dot"></span>
+          <span>{partner.substrate.model} · {partner.substrate.backend} · {partner.substrate.context_pct}% ctx</span>
+        </button>
+
+        {#if substrate_dropdown_open && substrate_models}
+          <div class="substrate-dropdown">
+            <div class="substrate-dropdown-header">
+              Switch {partner.name}'s substrate
+              <div class="substrate-dropdown-sub">Substrate IS the partner's body. Switching ends the current session and starts a new one.</div>
+            </div>
+            {#each substrate_models.categories as cat (cat.key)}
+              <div class="substrate-category">
+                <div class="substrate-category-label">{cat.label}</div>
+                {#each cat.models as m (m.name)}
+                  <button
+                    class="substrate-option"
+                    class:current={m.is_current}
+                    class:remote={!m.is_local}
+                    onclick={() => on_model_pick(m)}
+                  >
+                    <div class="substrate-option-row">
+                      <span class="substrate-option-name">{m.name}</span>
+                      {#if m.is_current}<span class="substrate-option-tag current-tag">current</span>{/if}
+                      {#if !m.is_local && !m.name.endsWith('-cloud')}<span class="substrate-option-tag remote-tag">not pulled</span>{/if}
+                    </div>
+                    <div class="substrate-option-note">{m.note}</div>
+                  </button>
+                {/each}
+              </div>
+            {/each}
+          </div>
+        {/if}
+      </div>
     </div>
 
     <!-- Chat area -->
@@ -435,5 +557,44 @@
       </div>
     </div>
   </main>
+
+  <!-- ============================================================ -->
+  <!-- Substrate switch confirmation modal (Phase 2b-1) -->
+  <!-- ============================================================ -->
+  {#if pending_switch}
+    <div class="modal-backdrop" onclick={on_switch_cancel}>
+      <div class="modal-panel" onclick={(e) => e.stopPropagation()}>
+        <div class="modal-title">Switch substrate?</div>
+        <div class="modal-body">
+          <div class="modal-line"><span class="modal-label">From:</span> <code>{partner.substrate.model}</code> ({partner.substrate.backend})</div>
+          <div class="modal-line"><span class="modal-label">To:</span> <code>{pending_switch.name}</code> ({pending_switch.backend})</div>
+          <div class="modal-note">{pending_switch.note}</div>
+          <div class="modal-warning">
+            This ends {partner.name}'s current session (preserved on disk) and starts a fresh one on the new substrate. A timestamped backup of the TOML config is written first.
+          </div>
+        </div>
+        <div class="modal-actions">
+          <button class="modal-button modal-button-cancel" onclick={on_switch_cancel} disabled={switch_in_progress}>Cancel</button>
+          <button class="modal-button modal-button-confirm" onclick={on_switch_confirm} disabled={switch_in_progress}>
+            {switch_in_progress ? 'Switching…' : 'Switch substrate'}
+          </button>
+        </div>
+      </div>
+    </div>
+  {/if}
+
+  <!-- Switch result toast -->
+  {#if switch_result}
+    <div class="toast" class:toast-ok={switch_result.ok} class:toast-err={!switch_result.ok}>
+      <div class="toast-content">
+        {#if switch_result.ok}
+          ✓ {switch_result.message}
+        {:else}
+          ✗ Switch failed: {switch_result.error}
+        {/if}
+      </div>
+      <button class="toast-dismiss" onclick={on_switch_result_dismiss}>×</button>
+    </div>
+  {/if}
 
 </div>
