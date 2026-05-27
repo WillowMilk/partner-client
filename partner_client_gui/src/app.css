@@ -892,6 +892,35 @@ code,
   line-height: var(--line-height-tight);
 }
 
+.modal-meta {
+  font-size: var(--text-meta);
+  color: var(--text-muted);
+  margin-left: var(--space-2);
+}
+
+/* MOSAIC button busy state — opacity pulse during operation. */
+.mosaic-button.busy {
+  opacity: 0.7;
+  animation: mosaic-busy-pulse 1.4s var(--ease-rest) infinite;
+}
+
+.mosaic-button:disabled:not(.busy) {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+@keyframes mosaic-busy-pulse {
+  0%, 100% { opacity: 0.6; }
+  50%      { opacity: 1.0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mosaic-button.busy {
+    animation: none;
+    opacity: 0.8;
+  }
+}
+
 .modal-actions {
   display: flex;
   gap: var(--space-3);

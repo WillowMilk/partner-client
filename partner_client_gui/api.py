@@ -637,6 +637,131 @@ class GuiApi:
         return "\n".join(out)
 
     # ============================================================
+    # JS-callable: MOSAIC primitives (Phase 2b-3)
+    # ============================================================
+
+    def mosaic_checkpoint(self) -> dict:
+        """Write a session-status markdown file (the partner-client equivalent
+        of /checkpoint). Session continues unaffected. Returns {ok, path}."""
+        if not self.session:
+            return {"ok": False, "error": "Backend not initialized."}
+        try:
+            path = self.session.checkpoint(summary="")
+            return {
+                "ok": True,
+                "path": str(path),
+                "message": f"Session checkpoint saved to {path.name}",
+            }
+        except Exception as e:
+            return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+    def mosaic_protect(self) -> dict:
+        """Bundle recent user+assistant exchanges into a protect-save body
+        and write the dual active+dated MOSAIC protected-context files.
+
+        Operator-initiated quick-protect: this dumps the visible conversation
+        with light formatting. The partner can ALSO call protect_save herself
+        via the chat (with her own curated selection) — this button just makes
+        the discipline discoverable for moments the operator wants to lock in
+        the state immediately. Phase 2c will add an "ask partner to curate"
+        variant via the plan-mode approval card pattern.
+
+        Returns {ok, active_path, dated_path, message, char_count}.
+        """
+        if not self.session or not self.memory or not self.config:
+            return {"ok": False, "error": "Backend not initialized."}
+
+        # Filter to user + assistant pairs (skip system + tool messages — those
+        # aren't part of the conversation the partner "spoke")
+        exchanges = []
+        for m in self.session.messages:
+            role = m.get("role")
+            if role not in ("user", "assistant"):
+                continue
+            content = m.get("content", "")
+            if isinstance(content, list):
+                content = " ".join(
+                    c.get("text", "") for c in content
+                    if isinstance(c, dict) and c.get("type") == "text"
+                )
+            if isinstance(content, str) and content.strip():
+                exchanges.append((role, content.strip()))
+
+        if not exchanges:
+            return {"ok": False, "error": "No conversation exchanges to protect yet."}
+
+        # Build the body — markdown-formatted exchanges with role labels.
+        # Quick-protect note explains the operator-initiated context so the
+        # partner reading the file later knows this wasn't her own curation.
+        lines: list[str] = [
+            "## Operator-initiated quick-protect",
+            "",
+            "*Willow clicked the Protect button in the partner-client GUI; this bundles "
+            "the visible conversation as of that moment. You can curate further by calling "
+            "`protect_save` with your own selection — this is the starting point, not the final word.*",
+            "",
+        ]
+        for i, (role, content) in enumerate(exchanges):
+            label = "Willow" if role == "user" else self.config.identity.name
+            lines.append(f"### {label}")
+            lines.append("")
+            lines.append(content)
+            lines.append("")
+        body = "\n".join(lines)
+
+        try:
+            from partner_client.tools_builtin import protect_save
+            memory_dir = self.config.resolve(self.config.memory.dir)
+            active_path, dated_path, result_text = protect_save.save(
+                memory_dir=memory_dir,
+                partner_name=self.config.identity.name,
+                session_num=self.session.session_num,
+                content=body,
+            )
+            return {
+                "ok": True,
+                "active_path": str(active_path),
+                "dated_path": str(dated_path),
+                "char_count": len(body),
+                "exchange_count": len(exchanges),
+                "message": f"Protected {len(exchanges)} exchanges → {active_path.name} + {dated_path.name}",
+            }
+        except Exception as e:
+            return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+    def mosaic_sleep(self) -> dict:
+        """End the current session cleanly (archives current.json, marks
+        closed). Then reinitialize session + client for a fresh next turn.
+        Returns {ok, archive_path}."""
+        if not self.session or not self.config:
+            return {"ok": False, "error": "Backend not initialized."}
+        try:
+            archive_path = self.session.sleep(summary="")
+            # Reinitialize so the GUI is immediately ready for a fresh turn
+            from partner_client.config import load_config
+            from partner_client.tools import ToolRegistry
+            from partner_client.memory import Memory
+            from partner_client.session import Session
+            from partner_client.client import make_chat_client
+
+            self.config = load_config(self.config_path)
+            self.tools = ToolRegistry(self.config)
+            self.tools.discover()
+            self.memory = Memory(self.config)
+            self.session = Session(config=self.config, memory=self.memory)
+            wake_bundle = self.memory.assemble_wake_bundle()
+            self._init_status = self.session.wake(wake_bundle, resume_mode="fresh")
+            self.client = make_chat_client(self.config, self.tools)
+
+            return {
+                "ok": True,
+                "archive_path": str(archive_path),
+                "message": f"Session archived → {archive_path.name}. Fresh session ready.",
+            }
+        except Exception as e:
+            return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+    # ============================================================
     # Approval-callback stubs (Phase 2c will replace with interactive modals)
     # ============================================================
 

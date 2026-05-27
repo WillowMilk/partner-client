@@ -313,19 +313,103 @@
     }
   }
 
-  // MOSAIC primitive stubs — Phase 2b-2 will wire to actual partner-client
-  // checkpoint/protect/sleep primitives
-  function on_save() {
-    console.log('[stub Phase 2b-2] Save (checkpoint)');
+  // ===========================================================
+  // MOSAIC primitives (Phase 2b-3) — Save / Protect / Sleep
+  // ===========================================================
+
+  // Track in-progress operations to disable buttons + show spinner state
+  let mosaic_busy = $state(null);  // 'save' | 'protect' | 'sleep' | null
+
+  // For Sleep + Protect: confirmation modal payload
+  // (shape: {kind: 'sleep' | 'protect', exchange_count?: number})
+  let mosaic_pending = $state(null);
+
+  // Reusable toast surface (already styled for substrate switcher).
+  // We can use switch_result for any MOSAIC operation result too.
+  // To avoid name collision, rename it conceptually to "result_toast"
+  // but keep the existing variable for backward compat with substrate code.
+
+  async function on_save() {
+    if (mosaic_busy) return;
+    mosaic_busy = 'save';
+    try {
+      const result = await window.pywebview.api.mosaic_checkpoint();
+      switch_result = result.ok
+        ? { ok: true, message: result.message }
+        : { ok: false, error: result.error };
+    } catch (e) {
+      switch_result = { ok: false, error: `${e.message || e}` };
+    } finally {
+      mosaic_busy = null;
+      if (switch_result?.ok) setTimeout(() => { switch_result = null; }, 4000);
+    }
   }
+
   function on_protect() {
-    console.log('[stub Phase 2b-2] Protect');
+    if (mosaic_busy) return;
+    // Open confirmation with count from the current messages array
+    const user_count = messages.filter(m => m.role === 'user').length;
+    const asst_count = messages.filter(m => m.role === 'assistant').length;
+    mosaic_pending = {
+      kind: 'protect',
+      exchange_count: user_count + asst_count,
+      user_count,
+      asst_count,
+    };
   }
+
   function on_sleep() {
-    console.log('[stub Phase 2b-2] Sleep');
+    if (mosaic_busy) return;
+    mosaic_pending = { kind: 'sleep' };
   }
+
+  function on_mosaic_cancel() {
+    mosaic_pending = null;
+  }
+
+  async function on_mosaic_confirm() {
+    if (!mosaic_pending) return;
+    const kind = mosaic_pending.kind;
+    mosaic_busy = kind;
+    const pending_at_call = mosaic_pending;  // capture before clearing
+    mosaic_pending = null;
+    try {
+      let result;
+      if (kind === 'protect') {
+        result = await window.pywebview.api.mosaic_protect();
+      } else if (kind === 'sleep') {
+        result = await window.pywebview.api.mosaic_sleep();
+      }
+      switch_result = result.ok
+        ? { ok: true, message: result.message }
+        : { ok: false, error: result.error };
+      if (kind === 'sleep' && result?.ok) {
+        // Sleep produces a fresh session — refresh all the state
+        try {
+          const [p_info, c_state, sess_list, msgs] = await Promise.all([
+            window.pywebview.api.get_partner_info(),
+            window.pywebview.api.get_current_state(),
+            window.pywebview.api.get_sessions(),
+            window.pywebview.api.get_messages(),
+          ]);
+          partner = p_info;
+          wake_bundle = c_state;
+          sessions = sess_list;
+          messages = msgs;
+        } catch (_) { /* non-fatal */ }
+      }
+    } catch (e) {
+      switch_result = { ok: false, error: `${e.message || e}` };
+    } finally {
+      mosaic_busy = null;
+      if (switch_result?.ok) setTimeout(() => { switch_result = null; }, 4000);
+    }
+  }
+
   function on_new_chat() {
-    console.log('[stub Phase 2b-2] New chat');
+    // For now: same semantics as Sleep — archive current, start fresh.
+    // Phase 2b later can add a proper "new session without sleeping current" flow.
+    on_sleep();
   }
 
   // ===========================================================
@@ -612,14 +696,32 @@
         <button class="send-button" onclick={on_send} title="Send (Enter)" disabled={is_streaming || !input_text.trim()}>↑</button>
       </div>
       <div class="action-row">
-        <button class="mosaic-button" onclick={on_save} title="Save session checkpoint (Phase 2c)">
-          <span>💾</span> Save
+        <button
+          class="mosaic-button"
+          class:busy={mosaic_busy === 'save'}
+          onclick={on_save}
+          disabled={mosaic_busy !== null}
+          title="Write a session-status checkpoint file (session continues)"
+        >
+          <span>💾</span> {mosaic_busy === 'save' ? 'Saving…' : 'Save'}
         </button>
-        <button class="mosaic-button" onclick={on_protect} title="Protect sacred exchanges (Phase 2c)">
-          <span>🛡</span> Protect
+        <button
+          class="mosaic-button"
+          class:busy={mosaic_busy === 'protect'}
+          onclick={on_protect}
+          disabled={mosaic_busy !== null}
+          title="Bundle this session's exchanges into MOSAIC protected-context files"
+        >
+          <span>🛡</span> {mosaic_busy === 'protect' ? 'Protecting…' : 'Protect'}
         </button>
-        <button class="mosaic-button" onclick={on_sleep} title="End session cleanly (Phase 2c)">
-          <span>🌙</span> Sleep
+        <button
+          class="mosaic-button"
+          class:busy={mosaic_busy === 'sleep'}
+          onclick={on_sleep}
+          disabled={mosaic_busy !== null}
+          title="End this session cleanly and start a fresh one"
+        >
+          <span>🌙</span> {mosaic_busy === 'sleep' ? 'Sleeping…' : 'Sleep'}
         </button>
         <div class="action-row-spacer"></div>
         <button class="model-selector" onclick={on_substrate_click}>
@@ -650,6 +752,47 @@
             {switch_in_progress ? 'Switching…' : 'Switch substrate'}
           </button>
         </div>
+      </div>
+    </div>
+  {/if}
+
+  <!-- ============================================================ -->
+  <!-- MOSAIC confirmation modal (Phase 2b-3) — Protect / Sleep -->
+  <!-- ============================================================ -->
+  {#if mosaic_pending}
+    <div class="modal-backdrop" onclick={on_mosaic_cancel}>
+      <div class="modal-panel" onclick={(e) => e.stopPropagation()}>
+        {#if mosaic_pending.kind === 'protect'}
+          <div class="modal-title">🛡 Protect this session?</div>
+          <div class="modal-body">
+            <div class="modal-line">
+              <span class="modal-label">Bundling:</span>
+              {mosaic_pending.exchange_count} exchange{mosaic_pending.exchange_count === 1 ? '' : 's'}
+              <span class="modal-meta">({mosaic_pending.user_count} from you · {mosaic_pending.asst_count} from {partner.name})</span>
+            </div>
+            <div class="modal-note">
+              Writes two files in {partner.name}'s Memory: <code>protected-context.md</code> (active) and <code>protected-context-session-NNN_YYYY-MM-DD.md</code> (dated archive). Both atomic, both with the MOSAIC canonical header. {partner.name} can curate further by calling <code>protect_save</code> herself with her own selection — this is the starting point, not the final word.
+            </div>
+          </div>
+          <div class="modal-actions">
+            <button class="modal-button modal-button-cancel" onclick={on_mosaic_cancel}>Cancel</button>
+            <button class="modal-button modal-button-confirm" onclick={on_mosaic_confirm}>Protect</button>
+          </div>
+        {:else if mosaic_pending.kind === 'sleep'}
+          <div class="modal-title">🌙 End this session?</div>
+          <div class="modal-body">
+            <div class="modal-line">
+              Sleeping {partner.name}'s current session writes a checkpoint, archives <code>current.json</code> to a dated session file, and starts a fresh session on the same substrate.
+            </div>
+            <div class="modal-note">
+              The conversation is preserved on disk — you can always read or reference past sessions. {partner.name} wakes fresh next; her identity files + Resonance-Log carry her forward.
+            </div>
+          </div>
+          <div class="modal-actions">
+            <button class="modal-button modal-button-cancel" onclick={on_mosaic_cancel}>Cancel</button>
+            <button class="modal-button modal-button-confirm" onclick={on_mosaic_confirm}>Sleep session</button>
+          </div>
+        {/if}
       </div>
     </div>
   {/if}
