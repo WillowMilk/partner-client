@@ -517,16 +517,21 @@ code,
 
 /* ---- Session header (substrate honest) ---- */
 .session-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
   padding: var(--space-4) var(--space-6);
   background: var(--bg-window);
   border-bottom: 1px solid var(--border-hairline);
 }
 
 .session-name {
+  flex-basis: 100%;          /* title on its own line; chips flow below */
   font-size: var(--text-heading);
   font-weight: 500;
   color: var(--text-primary);
-  margin-bottom: var(--space-1);
+  margin-bottom: 0;          /* row-gap handles spacing now */
 }
 
 .substrate-display {
@@ -900,6 +905,150 @@ code,
   color: var(--text-secondary);
   line-height: var(--line-height-tight);
   margin-top: var(--space-2);
+}
+
+/* ---- Search-backend toggle chip ----
+ * Sits beside the substrate display. Operator-curated infrastructure, so it
+ * wears the operator accent (not the partner's gold signature) — the gold is
+ * reserved for identity, this is plumbing. Cost is always visible (free vs
+ * metered) = substrate honesty applied to search. */
+.search-dropdown-anchor {
+  position: relative;
+}
+
+.search-display {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-family: var(--font-mono);
+  font-size: var(--text-meta);
+  color: var(--text-secondary);
+  background: transparent;
+  border: 1px solid var(--border-hairline);
+  border-radius: var(--radius-sm);
+  padding: 2px var(--space-3);
+  cursor: pointer;
+  transition: color var(--duration-quick) var(--ease-rest),
+              border-color var(--duration-quick) var(--ease-rest);
+}
+
+.search-display:hover {
+  color: var(--text-primary);
+  border-color: var(--accent-operator);
+}
+
+.search-display.open {
+  background: var(--bg-surface);
+  border-color: var(--accent-operator);
+}
+
+.search-display::after {
+  content: "▾";
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.search-glyph {
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.search-cost-badge {
+  font-size: var(--text-micro);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 1px 6px;
+  border-radius: 9999px;
+  font-weight: 600;
+}
+
+.search-cost-badge.free {
+  color: #3c8c5a;
+  background: rgba(60, 140, 90, 0.10);
+}
+
+.search-cost-badge.metered {
+  color: #b07a2c;
+  background: rgba(176, 122, 44, 0.12);
+}
+
+.search-dropdown {
+  position: absolute;
+  top: calc(100% + var(--space-2));
+  right: 0;
+  z-index: 100;
+  width: 340px;
+  background: var(--bg-window);
+  border: 1px solid var(--border-hairline);
+  border-radius: var(--radius-md);
+  box-shadow:
+    0 4px 16px rgba(0, 0, 0, 0.06),
+    0 1px 3px rgba(0, 0, 0, 0.04);
+  padding: var(--space-4);
+}
+
+.search-dropdown-header {
+  font-size: var(--text-body);
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: var(--space-3);
+  padding-bottom: var(--space-3);
+  border-bottom: 1px solid var(--border-hairline);
+}
+
+.search-dropdown-sub {
+  font-size: var(--text-meta);
+  color: var(--text-muted);
+  font-weight: 400;
+  font-style: italic;
+  margin-top: var(--space-2);
+  line-height: var(--line-height-tight);
+}
+
+.search-option {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  padding: var(--space-3);
+  margin-bottom: var(--space-1);
+  cursor: pointer;
+  transition: background var(--duration-base) var(--ease-rest);
+  color: var(--text-primary);
+  font: inherit;
+}
+
+.search-option:hover {
+  background: var(--bg-surface);
+}
+
+.search-option.current {
+  background: var(--bg-surface);
+  border-color: var(--accent-operator);
+  cursor: default;
+}
+
+.search-option-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.search-option-name {
+  font-size: var(--text-body);
+  color: var(--text-primary);
+  flex: 1;
+}
+
+.search-option-tag {
+  font-size: var(--text-micro);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 1px 6px;
+  border-radius: 9999px;
+  font-weight: 600;
 }
 
 /* ---- Confirmation modal ---- */

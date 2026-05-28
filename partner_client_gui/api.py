@@ -685,6 +685,131 @@ class GuiApi:
         return "\n".join(out)
 
     # ============================================================
+    # JS-callable: search-backend toggle
+    # ============================================================
+
+    def get_search_backends(self) -> dict:
+        """Return the search-backend options for the GUI toggle chip.
+
+        {active: str, configured: bool, backends: [{name, label, cost, type,
+         is_active}]}. configured=False means no [search] block (the toggle
+         hides itself and the partner uses legacy search tools).
+        """
+        if not self.config:
+            return {"configured": False, "active": "", "backends": []}
+        search = getattr(self.config, "search", None)
+        if search is None or not search.backends:
+            return {"configured": False, "active": "", "backends": []}
+        backends = [
+            {
+                "name": name,
+                "label": b.label or name,
+                "cost": b.cost,
+                "type": b.type,
+                "is_active": name == search.active,
+            }
+            for name, b in search.backends.items()
+        ]
+        # Active first, then free before metered, then alphabetical
+        backends.sort(key=lambda x: (not x["is_active"], x["cost"] != "free", x["name"]))
+        return {"configured": True, "active": search.active, "backends": backends}
+
+    def switch_search_backend(self, name: str) -> dict:
+        """Flip the active search engine. Unlike substrate-switch, this does
+        NOT reset the session — the search engine is infrastructure, not the
+        partner's body; swapping it mid-conversation is fine.
+
+        Steps: validate → backup TOML → rewrite [search].active → atomic write
+        → mutate the LIVE config object (the web_search dispatcher closes over
+        it, so the change takes effect on the very next search, no restart).
+
+        Returns {ok, active?, label?, cost?, message?, backup_path?, error?}.
+        """
+        if not self.config:
+            return {"ok": False, "error": "Backend not initialized."}
+        search = getattr(self.config, "search", None)
+        if search is None or not search.backends:
+            return {"ok": False, "error": "No search backends configured."}
+        name = (name or "").strip()
+        if name not in search.backends:
+            return {"ok": False, "error": f"Unknown search backend: {name!r}"}
+        if name == search.active:
+            b = search.backends[name]
+            return {"ok": True, "active": name, "label": b.label or name,
+                    "cost": b.cost, "message": f"Already using {b.label or name}.",
+                    "unchanged": True}
+
+        toml_path = Path(self.config.config_path)
+        if not toml_path.is_file():
+            return {"ok": False, "error": f"Config file not found at {toml_path}"}
+
+        # Backup
+        try:
+            timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+            backup_name = f"{toml_path.stem} bak {timestamp} pre-search-switch{toml_path.suffix}"
+            backup_path = toml_path.parent / backup_name
+            shutil.copy2(toml_path, backup_path)
+        except Exception as e:
+            return {"ok": False, "error": f"Backup failed: {e}"}
+
+        # Rewrite [search].active + atomic write
+        try:
+            original = toml_path.read_text(encoding="utf-8")
+            updated = self._rewrite_search_active(original, name)
+            tmp_path = toml_path.with_suffix(toml_path.suffix + ".tmp")
+            tmp_path.write_text(updated, encoding="utf-8")
+            tmp_path.replace(toml_path)
+        except Exception as e:
+            return {"ok": False, "error": f"TOML write failed: {e}"}
+
+        # Mutate the live config — instant effect, no restart, no session reset
+        search.active = name
+        b = search.backends[name]
+        cost_note = "free + unlimited" if b.cost == "free" else "metered — uses credits"
+        return {
+            "ok": True,
+            "active": name,
+            "label": b.label or name,
+            "cost": b.cost,
+            "backup_path": str(backup_path),
+            "message": f"Search now via {b.label or name} ({cost_note}).",
+        }
+
+    @staticmethod
+    def _rewrite_search_active(toml_text: str, new_active: str) -> str:
+        """Rewrite `active = "..."` within the [search] section. If the [search]
+        section has no active line, insert one right after the header. Preserves
+        all comments + formatting elsewhere."""
+        lines = toml_text.split("\n")
+        in_search = False
+        updated = False
+        out: list[str] = []
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("[") and stripped.endswith("]"):
+                # Entering/leaving [search] (but NOT [search.backends.*] subtables)
+                in_search = (stripped == "[search]")
+                out.append(line)
+                continue
+            if in_search and not updated:
+                m = re.match(r"^(\s*)active\s*=\s*", line)
+                if m:
+                    out.append(f'{m.group(1)}active = "{new_active}"')
+                    updated = True
+                    continue
+            out.append(line)
+        # If [search] existed but had no active line, insert after the header
+        if not updated:
+            new_out: list[str] = []
+            for line in out:
+                new_out.append(line)
+                if line.strip() == "[search]":
+                    new_out.append(f'active = "{new_active}"')
+                    updated = True
+            out = new_out
+        return "\n".join(out)
+
+    # ============================================================
     # JS-callable: MOSAIC primitives (Phase 2b-3)
     # ============================================================
 

@@ -67,6 +67,12 @@
   let switch_in_progress = $state(false);
   let switch_result = $state(null);     // {ok, message, error} after switch completes
 
+  // Search-backend toggle state
+  let search_dropdown_open = $state(false);
+  let search_backends = $state(null);   // {configured, active, backends[]}
+  let search_active_label = $state('');
+  let search_active_cost = $state('free');
+
   // Streaming (Phase 2b-2) state — currently-open streaming assistant message.
   // While non-null, content arrives token-by-token from Python via the
   // window.__stream_* callbacks. When the stream closes, this message is
@@ -231,6 +237,8 @@
       sessions = sess_list;
       messages = msgs;
       inbox_unread = unread;
+
+      await load_search_backends();
 
       document.body.dataset.partner = partner.handle;
       document.title = `partner-client — ${partner.name}`;
@@ -486,12 +494,60 @@
   function on_switch_result_dismiss() {
     switch_result = null;
   }
+
+  // ===========================================================
+  // Search-backend toggle
+  // ===========================================================
+
+  async function load_search_backends() {
+    try {
+      const info = await window.pywebview.api.get_search_backends();
+      search_backends = info;
+      if (info && info.configured) {
+        const active = info.backends.find((b) => b.is_active);
+        if (active) {
+          search_active_label = active.label;
+          search_active_cost = active.cost;
+        }
+      }
+    } catch (e) {
+      console.error('Failed to load search backends:', e);
+    }
+  }
+
+  function on_search_click() {
+    if (!backend_connected) return;
+    search_dropdown_open = !search_dropdown_open;
+  }
+
+  async function on_search_pick(backend) {
+    search_dropdown_open = false;
+    if (backend.is_active) return;  // no-op
+    try {
+      const result = await window.pywebview.api.switch_search_backend(backend.name);
+      if (result.ok) {
+        search_active_label = result.label;
+        search_active_cost = result.cost;
+        await load_search_backends();  // refresh is_active flags
+        switch_result = { ok: true, message: result.message };
+        setTimeout(() => { switch_result = null; }, 4000);
+      } else {
+        switch_result = { ok: false, error: result.error };
+      }
+    } catch (e) {
+      switch_result = { ok: false, error: `${e.message || e}` };
+    }
+  }
 </script>
 
 <svelte:window onclick={(e) => {
   // Close substrate dropdown when clicking outside of it
   if (substrate_dropdown_open && !e.target.closest('.substrate-dropdown-anchor')) {
     substrate_dropdown_open = false;
+  }
+  // Close search dropdown when clicking outside of it
+  if (search_dropdown_open && !e.target.closest('.search-dropdown-anchor')) {
+    search_dropdown_open = false;
   }
 }} />
 
@@ -636,6 +692,44 @@
           </div>
         {/if}
       </div>
+
+      {#if search_backends && search_backends.configured}
+        <div class="search-dropdown-anchor">
+          <button
+            class="search-display"
+            class:open={search_dropdown_open}
+            class:metered={search_active_cost === 'metered'}
+            onclick={on_search_click}
+            title="Active search engine — click to switch"
+          >
+            <span class="search-glyph">⌕</span>
+            <span>{search_active_label}</span>
+            {#if search_active_cost === 'metered'}<span class="search-cost-badge metered">metered</span>{:else}<span class="search-cost-badge free">free</span>{/if}
+          </button>
+
+          {#if search_dropdown_open}
+            <div class="search-dropdown">
+              <div class="search-dropdown-header">
+                Search engine
+                <div class="search-dropdown-sub">One capability, swappable engine. {partner.name} just searches; you curate the source. Switching is instant — no session reset.</div>
+              </div>
+              {#each search_backends.backends as b (b.name)}
+                <button
+                  class="search-option"
+                  class:current={b.is_active}
+                  onclick={() => on_search_pick(b)}
+                >
+                  <div class="search-option-row">
+                    <span class="search-option-name">{b.label}</span>
+                    {#if b.is_active}<span class="search-option-tag current-tag">active</span>{/if}
+                    <span class="search-cost-badge {b.cost}">{b.cost}</span>
+                  </div>
+                </button>
+              {/each}
+            </div>
+          {/if}
+        </div>
+      {/if}
     </div>
 
     <!-- Chat area -->
