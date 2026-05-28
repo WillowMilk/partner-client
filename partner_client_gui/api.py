@@ -711,9 +711,10 @@ class GuiApi:
 
         try:
             from partner_client.tools_builtin import protect_save
-            memory_dir = self.config.resolve(self.config.memory.dir)
+            # Memory.memory_dir is already a resolved Path (Memory.__init__
+            # does config.resolve()); no need to re-resolve.
             active_path, dated_path, result_text = protect_save.save(
-                memory_dir=memory_dir,
+                memory_dir=self.memory.memory_dir,
                 partner_name=self.config.identity.name,
                 session_num=self.session.session_num,
                 content=body,
