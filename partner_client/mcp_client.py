@@ -72,23 +72,38 @@ class McpToolHandle:
 class McpServerManager:
     """Manages MCP server connections + provides sync entry points.
 
-    Lifecycle:
-        - __init__: spawn the background asyncio thread + event loop
-        - start_server(spec): launch + initialize + cache the session
-        - list_tools(server_name): return tool handles for a started server
-        - call_tool(server_name, tool_name, args): invoke + return result
-        - shutdown_all(): clean stop of all servers + background loop
+    Architecture (revised after first end-to-end smoke test, 2026-05-28):
 
-    Thread safety: all public methods are sync and thread-safe.
-    Internal session state is only touched from the background loop.
+    The MCP SDK uses anyio cancel scopes that REQUIRE enter + exit to happen
+    in the same async task. Our first implementation entered the context
+    in start_server's _do_start() coro and tried to exit it in shutdown's
+    _do_shutdown() coro — different tasks, anyio rightly screamed.
+
+    Canonical pattern: each MCP server gets a dedicated long-running task
+    that:
+        1. Enters the stdio_client + ClientSession context managers
+        2. Calls initialize() + list_tools()
+        3. Waits on an asyncio.Queue for tool-call requests
+        4. Processes each request and pushes the result back via a Future
+        5. On receiving a sentinel (None), exits the context managers in
+           THIS SAME task (anyio is happy)
+
+    Sync entry points (start_server/call_tool/shutdown_all) communicate with
+    these tasks via thread-safe asyncio.run_coroutine_threadsafe + per-server
+    request queues. All public methods remain synchronous + thread-safe.
     """
 
     def __init__(self) -> None:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._loop_thread: threading.Thread | None = None
         self._loop_ready = threading.Event()
-        self._sessions: dict[str, Any] = {}  # server_name -> ClientSession
-        self._stacks: dict[str, AsyncExitStack] = {}  # server_name -> exit stack
+        # Per-server async state, only touched from the background loop:
+        #   queues[name] = asyncio.Queue of (op, payload, future)
+        #     op = "call" payload = (tool_name, arguments)
+        #     op = "shutdown" payload = None  -> drains + exits
+        # Task references kept so we can await their completion on shutdown.
+        self._queues: dict[str, "asyncio.Queue[Any]"] = {}
+        self._tasks: dict[str, "asyncio.Task[Any]"] = {}
         self._tool_handles: dict[str, list[McpToolHandle]] = {}
         self._lock = threading.Lock()
         self._shutdown_called = False
@@ -127,57 +142,115 @@ class McpServerManager:
         return future.result(timeout=timeout)
 
     # ─────────────────────────────────────────────────────────────────
+    # The per-server task — handles full session lifecycle in ONE task
+    # ─────────────────────────────────────────────────────────────────
+
+    async def _server_task(
+        self,
+        spec: McpServerSpec,
+        queue: "asyncio.Queue[Any]",
+        ready: "asyncio.Future[list[McpToolHandle]]",
+    ) -> None:
+        """Long-running task that owns a single MCP server's session.
+
+        Holds the AsyncExitStack open from start to shutdown, signaling
+        readiness via the `ready` future once tools are discovered. Pulls
+        tool-call requests off `queue` and dispatches them. Exits the
+        stack cleanly when a None sentinel is queued (shutdown signal).
+        """
+        from mcp.client.session import ClientSession
+        from mcp.client.stdio import StdioServerParameters, stdio_client
+
+        try:
+            params = StdioServerParameters(
+                command=spec.command,
+                args=spec.args,
+                env=spec.env or None,
+            )
+            async with stdio_client(params) as (read, write):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    tools_result = await session.list_tools()
+                    handles: list[McpToolHandle] = []
+                    for tool in tools_result.tools:
+                        if spec.allowed_tools and tool.name not in spec.allowed_tools:
+                            continue
+                        handles.append(McpToolHandle(
+                            server_name=spec.name,
+                            tool_name=tool.name,
+                            namespaced_name=f"mcp_{spec.name}_{tool.name}",
+                            description=tool.description or "",
+                            input_schema=dict(tool.inputSchema) if tool.inputSchema else {},
+                        ))
+                    if not ready.done():
+                        ready.set_result(handles)
+
+                    # Request loop — process tool calls until shutdown sentinel
+                    while True:
+                        item = await queue.get()
+                        if item is None:
+                            return  # exits the contexts in this task
+                        tool_name, arguments, fut = item
+                        try:
+                            result = await session.call_tool(tool_name, arguments)
+                            parts: list[str] = []
+                            for content in result.content:
+                                text = getattr(content, "text", None)
+                                if text is not None:
+                                    parts.append(text)
+                            if result.isError:
+                                joined = "\n".join(parts) if parts else "(no error detail)"
+                                text_out = f"[MCP error from {spec.name}.{tool_name}] {joined}"
+                            else:
+                                text_out = "\n".join(parts) if parts else "(no text content)"
+                            if not fut.done():
+                                fut.set_result(text_out)
+                        except Exception as e:
+                            if not fut.done():
+                                fut.set_exception(e)
+        except Exception as e:
+            # Surface startup errors via the ready future so start_server()
+            # can raise them synchronously to the caller.
+            if not ready.done():
+                ready.set_exception(e)
+            else:
+                log.exception("MCP server '%s' task crashed mid-flight", spec.name)
+
+    # ─────────────────────────────────────────────────────────────────
     # Server lifecycle (public sync API)
     # ─────────────────────────────────────────────────────────────────
 
     def start_server(self, spec: McpServerSpec, timeout: float = 30.0) -> list[McpToolHandle]:
         """Launch an MCP server + initialize it + discover its tools.
 
-        Returns the tool handles for this server. Re-calling on an
-        already-started server is a no-op (returns cached handles).
+        Spawns a dedicated task in the background loop that owns the
+        session's full lifecycle. Blocks until tools are discovered (or
+        the task fails) then returns the handles.
+
+        Idempotent: re-calling on an already-started server returns the
+        cached handles.
         """
         with self._lock:
-            if spec.name in self._sessions:
-                return self._tool_handles.get(spec.name, [])
+            if spec.name in self._tasks:
+                return list(self._tool_handles.get(spec.name, []))
 
-        async def _do_start():
-            from mcp.client.session import ClientSession
-            from mcp.client.stdio import StdioServerParameters, stdio_client
+        if self._loop is None:
+            raise RuntimeError("MCP loop not initialized")
 
-            stack = AsyncExitStack()
-            params = StdioServerParameters(
-                command=spec.command,
-                args=spec.args,
-                env=spec.env or None,
-            )
-            read, write = await stack.enter_async_context(stdio_client(params))
-            session = await stack.enter_async_context(ClientSession(read, write))
-            await session.initialize()
+        async def _do_spawn():
+            queue: asyncio.Queue[Any] = asyncio.Queue()
+            ready: asyncio.Future[list[McpToolHandle]] = self._loop.create_future()  # type: ignore
+            task = asyncio.create_task(self._server_task(spec, queue, ready))
+            handles = await ready
+            return queue, task, handles
 
-            tools_result = await session.list_tools()
-            handles: list[McpToolHandle] = []
-            for tool in tools_result.tools:
-                # Per-tool allowlist: skip if allowed_tools is non-empty and
-                # this tool isn't in it. Empty = no restriction (trust-by-default).
-                if spec.allowed_tools and tool.name not in spec.allowed_tools:
-                    continue
-                handles.append(McpToolHandle(
-                    server_name=spec.name,
-                    tool_name=tool.name,
-                    namespaced_name=f"mcp_{spec.name}_{tool.name}",
-                    description=tool.description or "",
-                    input_schema=dict(tool.inputSchema) if tool.inputSchema else {},
-                ))
-
-            return session, stack, handles
-
-        session, stack, handles = self._submit(_do_start(), timeout=timeout)
+        queue, task, handles = self._submit(_do_spawn(), timeout=timeout)
 
         with self._lock:
-            self._sessions[spec.name] = session
-            self._stacks[spec.name] = stack
+            self._queues[spec.name] = queue
+            self._tasks[spec.name] = task
             self._tool_handles[spec.name] = handles
-        log.info("MCP server '%s' started; %d tools discovered (allowed)", spec.name, len(handles))
+        log.info("MCP server '%s' started; %d tools registered (after allowlist filter)", spec.name, len(handles))
         return handles
 
     def list_tools(self, server_name: str | None = None) -> list[McpToolHandle]:
@@ -199,39 +272,32 @@ class McpServerManager:
     ) -> str:
         """Invoke an MCP tool on a started server. Returns the result as text.
 
-        If the server hasn't been started, raises RuntimeError. Callers should
-        ensure start_server() was called first (typically at registry-discovery time).
+        Queues the request on the server's task; blocks until the result
+        future resolves (or times out). Raises RuntimeError if the server
+        hasn't been started.
         """
         with self._lock:
-            session = self._sessions.get(server_name)
-        if session is None:
+            queue = self._queues.get(server_name)
+        if queue is None:
             raise RuntimeError(f"MCP server '{server_name}' is not started")
 
-        async def _do_call():
-            result = await session.call_tool(tool_name, arguments)
-            # Concatenate text content blocks (MCP results can be multi-block,
-            # mixing text + image + resource references). For MVP we only
-            # surface text; future Phase 2c can handle images via the vision
-            # pass-through path.
-            parts: list[str] = []
-            for content in result.content:
-                # ContentBlock variants: TextContent, ImageContent, etc.
-                text = getattr(content, "text", None)
-                if text is not None:
-                    parts.append(text)
-            if result.isError:
-                joined = "\n".join(parts) if parts else "(no error detail)"
-                return f"[MCP error from {server_name}.{tool_name}] {joined}"
-            return "\n".join(parts) if parts else "(no text content)"
+        if self._loop is None:
+            raise RuntimeError("MCP loop not initialized")
 
-        return self._submit(_do_call(), timeout=timeout)
+        # Build the future on the background loop (it lives there)
+        async def _enqueue():
+            fut: asyncio.Future[str] = self._loop.create_future()  # type: ignore
+            await queue.put((tool_name, arguments, fut))
+            return await fut
+
+        return self._submit(_enqueue(), timeout=timeout)
 
     def shutdown_all(self) -> None:
         """Clean shutdown of all servers + the background loop.
 
-        Idempotent — safe to call multiple times. Registered via atexit so
-        it fires automatically on interpreter exit, but the operator can
-        call it explicitly (e.g. when switching substrates).
+        Sends None sentinel to each server's queue so the task exits its
+        context managers in the same task that entered them (anyio-safe).
+        Idempotent; registered via atexit.
         """
         if self._shutdown_called:
             return
@@ -242,19 +308,31 @@ class McpServerManager:
 
         async def _do_shutdown():
             with self._lock:
-                stacks = list(self._stacks.items())
-                self._stacks.clear()
-                self._sessions.clear()
+                queues = list(self._queues.items())
+                tasks = list(self._tasks.items())
+                self._queues.clear()
+                self._tasks.clear()
                 self._tool_handles.clear()
-            for name, stack in stacks:
+            # Send shutdown sentinels
+            for _, queue in queues:
+                await queue.put(None)
+            # Wait for tasks to finish (with timeout per task)
+            for name, task in tasks:
                 try:
-                    await stack.aclose()
+                    await asyncio.wait_for(task, timeout=5.0)
+                except asyncio.TimeoutError:
+                    log.warning("MCP server '%s' did not shut down within 5s; cancelling", name)
+                    task.cancel()
+                    try:
+                        await task
+                    except (asyncio.CancelledError, Exception):
+                        pass
                 except Exception as e:
-                    log.warning("Error shutting down MCP server '%s': %s", name, e)
+                    log.warning("Error awaiting MCP server '%s' task: %s", name, e)
 
         try:
             future = asyncio.run_coroutine_threadsafe(_do_shutdown(), self._loop)
-            future.result(timeout=10.0)
+            future.result(timeout=15.0)
         except Exception as e:
             log.warning("Error during MCP shutdown: %s", e)
 

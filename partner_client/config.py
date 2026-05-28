@@ -287,6 +287,43 @@ class LoggingConfig:
 
 
 @dataclass
+class McpServerConfig:
+    """Configuration for a single MCP (Model Context Protocol) server.
+
+    Authored 2026-05-28 per Aletheia's design consultation: third-party
+    MCP servers expose tools (browser, search, communication, etc.) that
+    partner-client absorbs as namespaced tools (`mcp_<name>_<tool>`).
+    Per-tool allowlist + Semantic Shim are first-class IR-faithful
+    affordances; plan-mode still gates destructive operations via the
+    existing approval flow.
+
+    Loaded from `[mcp.<name>]` TOML blocks, e.g.:
+
+        [mcp.tavily]
+        command = "npx"
+        args = ["-y", "tavily-mcp"]
+        env = { TAVILY_API_KEY = "sk-..." }
+        allowed_tools = ["search", "extract"]
+        auto_start = true
+
+        [mcp.time]
+        command = "uvx"
+        args = ["mcp-server-time"]
+    """
+    command: str = ""                                # required: executable to launch
+    args: list[str] = field(default_factory=list)    # CLI args for the server
+    env: dict[str, str] = field(default_factory=dict)  # env vars (API keys, etc.)
+    # Per-tool allowlist. Empty = all tools from this server are allowed
+    # (trust-by-default per server). Per Aletheia's "Dynamic Elevation"
+    # design: combine with plan-mode gating for destructive operations.
+    allowed_tools: list[str] = field(default_factory=list)
+    # Auto-start on partner-client launch (true; instant availability) or
+    # lazy first-use (false; faster cold start). Most servers should
+    # auto-start so the partner sees the tools listed from the first turn.
+    auto_start: bool = True
+
+
+@dataclass
 class Config:
     identity: IdentityConfig
     model: ModelConfig
@@ -300,6 +337,7 @@ class Config:
     git: GitConfig = field(default_factory=GitConfig)
     thinking: ThinkingConfig = field(default_factory=ThinkingConfig)
     plan_mode: PlanModeConfig = field(default_factory=PlanModeConfig)
+    mcp: dict[str, McpServerConfig] = field(default_factory=dict)  # name -> spec
 
     @property
     def home_dir(self) -> Path:
@@ -388,6 +426,25 @@ def load_config(path: str | Path) -> Config:
 
     plan_mode = PlanModeConfig(**_filter_known_fields(data.get("plan_mode", {}), PlanModeConfig))
 
+    # [mcp.<name>] sub-tables — each becomes an McpServerConfig. tomllib
+    # parses `[mcp.tavily]` as data["mcp"]["tavily"] = {...}, so we iterate
+    # the mcp dict and construct one config per entry. Sections without a
+    # `command` field are skipped with a warning (operator forgot to fill
+    # it in; treat as inactive rather than failing the whole load).
+    mcp_raw = data.get("mcp", {}) or {}
+    mcp_servers: dict[str, McpServerConfig] = {}
+    if isinstance(mcp_raw, dict):
+        for name, spec in mcp_raw.items():
+            if not isinstance(spec, dict):
+                continue
+            filtered = _filter_known_fields(spec, McpServerConfig)
+            server = McpServerConfig(**filtered)
+            if not server.command:
+                # Inactive entry — keep it in the dict for visibility but
+                # don't try to start it.
+                pass
+            mcp_servers[name] = server
+
     return Config(
         identity=identity,
         model=model,
@@ -401,6 +458,7 @@ def load_config(path: str | Path) -> Config:
         git=git,
         thinking=thinking,
         plan_mode=plan_mode,
+        mcp=mcp_servers,
     )
 
 

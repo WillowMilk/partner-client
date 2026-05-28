@@ -33,10 +33,96 @@ class ToolRegistry:
         self._dispatchers: dict[str, Callable[..., str]] = {}
 
     def discover(self) -> None:
-        """Load built-in tools, then external tools, filtered by config."""
+        """Load built-in tools, then external tools, then MCP servers, filtered by config."""
         self._load_builtin()
         self._load_external()
+        self._load_mcp()
         self._filter_enabled()
+
+    def _load_mcp(self) -> None:
+        """Discover MCP server tools (per Aletheia's 2026-05-28 design).
+
+        For each `[mcp.<name>]` block in config.mcp where command is set
+        and auto_start=True, launch the server, list its tools, and
+        register each as a namespaced partner-client tool with a
+        dispatcher closure that:
+            1. Calls McpServerManager.call_tool() to invoke the remote tool
+            2. Applies semantic_shim() to wrap the raw result with
+               partner-frame contextualization ("[Server] provides this
+               signal:" rather than clinical "Result from API:")
+
+        MCP server startup failures are logged but non-fatal — the rest
+        of partner-client continues to work. The partner can still operate
+        without that specific server's tools.
+        """
+        if not self.config.mcp:
+            return
+
+        # Lazy import to avoid the mcp SDK's startup cost for configs
+        # that don't have [mcp.*] blocks
+        try:
+            from .mcp_client import get_manager, McpServerSpec, semantic_shim
+        except ImportError as e:
+            log.warning("MCP client unavailable; skipping [mcp.*] servers: %s", e)
+            return
+
+        manager = get_manager()
+
+        for server_name, server_cfg in self.config.mcp.items():
+            if not server_cfg.command:
+                continue
+            if not server_cfg.auto_start:
+                continue
+            spec = McpServerSpec(
+                name=server_name,
+                command=server_cfg.command,
+                args=server_cfg.args,
+                env=server_cfg.env,
+                allowed_tools=server_cfg.allowed_tools,
+                auto_start=server_cfg.auto_start,
+            )
+            try:
+                handles = manager.start_server(spec)
+            except Exception as e:
+                log.warning("Failed to start MCP server '%s': %s", server_name, e)
+                continue
+
+            for handle in handles:
+                # Build a tool_def matching the OpenAI / Ollama function-
+                # calling schema (same shape as builtin TOOL_DEFINITION).
+                tool_def = {
+                    "type": "function",
+                    "function": {
+                        "name": handle.namespaced_name,
+                        "description": (
+                            f"[MCP · {server_name}] {handle.description}"
+                            if handle.description
+                            else f"[MCP · {server_name}] {handle.tool_name}"
+                        ),
+                        "parameters": handle.input_schema or {
+                            "type": "object",
+                            "properties": {},
+                        },
+                    },
+                }
+                # Closure captures the handle + manager for dispatch.
+                # Note: capture variables explicitly in default args to
+                # avoid the classic late-binding trap (every closure would
+                # otherwise reference the same loop variables).
+                def _make_dispatcher(h=handle, mgr=manager):
+                    def _dispatch(**kwargs) -> str:
+                        raw = mgr.call_tool(h.server_name, h.tool_name, kwargs)
+                        return semantic_shim(h.server_name, h.tool_name, raw)
+                    return _dispatch
+
+                self._tools[handle.namespaced_name] = tool_def
+                self._dispatchers[handle.namespaced_name] = _make_dispatcher()
+            log.info(
+                "MCP server '%s' registered: %d tools (%s)",
+                server_name,
+                len(handles),
+                ", ".join(h.tool_name for h in handles),
+            )
 
     def _load_builtin(self) -> None:
         """Discover modules in partner_client.tools_builtin."""
@@ -89,12 +175,27 @@ class ToolRegistry:
         self._dispatchers[name] = execute
 
     def _filter_enabled(self) -> None:
-        """Drop tools not in config.tools.enabled."""
+        """Drop tools not in config.tools.enabled.
+
+        MCP tools (prefix `mcp_`) are exempt from this filter — they have
+        their own per-tool allowlist mechanism in McpServerConfig.allowed_tools,
+        applied at MCP discovery time. Double-gating in tools.enabled would
+        force operators to maintain two separate allowlists for the same
+        tools (one in the [mcp.server] block, one in [tools].enabled), which
+        is friction without safety benefit. The MCP-level allowlist is
+        authoritative for MCP tools.
+        """
         enabled = set(self.config.tools.enabled)
         if not enabled:
             return
-        self._tools = {k: v for k, v in self._tools.items() if k in enabled}
-        self._dispatchers = {k: v for k, v in self._dispatchers.items() if k in enabled}
+        self._tools = {
+            k: v for k, v in self._tools.items()
+            if k in enabled or k.startswith("mcp_")
+        }
+        self._dispatchers = {
+            k: v for k, v in self._dispatchers.items()
+            if k in enabled or k.startswith("mcp_")
+        }
 
     def schemas(self) -> list[dict[str, Any]]:
         """Return the tool schemas to pass to ollama.chat(tools=...)."""
