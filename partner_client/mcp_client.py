@@ -137,11 +137,19 @@ class McpServerManager:
         self._loop_thread: threading.Thread | None = None
         self._loop_ready = threading.Event()
         # Per-server async state, only touched from the background loop:
-        #   queues[name] = asyncio.Queue of (op, payload, future)
-        #     op = "call" payload = (tool_name, arguments)
-        #     op = "shutdown" payload = None  -> drains + exits
-        # Task references kept so we can await their completion on shutdown.
-        self._queues: dict[str, "asyncio.Queue[Any]"] = {}
+        #   _sessions[name]        = the live ClientSession (set by the
+        #                            owning task once initialized). call_tool
+        #                            invokes session.call_tool() CONCURRENTLY
+        #                            — MCP multiplexes requests by ID, so
+        #                            multiple in-flight calls don't block
+        #                            each other (no head-of-line blocking).
+        #   _shutdown_events[name] = asyncio.Event the owning task awaits;
+        #                            setting it makes the task exit its
+        #                            context managers in the SAME task that
+        #                            entered them (anyio cancel-scope-safe).
+        #   _tasks[name]           = the owning task (kept to await on shutdown)
+        self._sessions: dict[str, Any] = {}
+        self._shutdown_events: dict[str, "asyncio.Event"] = {}
         self._tasks: dict[str, "asyncio.Task[Any]"] = {}
         self._tool_handles: dict[str, list[McpToolHandle]] = {}
         self._lock = threading.Lock()
@@ -187,15 +195,24 @@ class McpServerManager:
     async def _server_task(
         self,
         spec: McpServerSpec,
-        queue: "asyncio.Queue[Any]",
         ready: "asyncio.Future[list[McpToolHandle]]",
+        shutdown_event: "asyncio.Event",
     ) -> None:
         """Long-running task that owns a single MCP server's session.
 
-        Holds the AsyncExitStack open from start to shutdown, signaling
-        readiness via the `ready` future once tools are discovered. Pulls
-        tool-call requests off `queue` and dispatches them. Exits the
-        stack cleanly when a None sentinel is queued (shutdown signal).
+        Owns ONLY the session lifecycle: enter the context managers,
+        initialize, discover tools, publish the session reference + ready
+        signal, then await the shutdown_event. When the event fires, the
+        `async with` blocks exit IN THIS TASK — the same task that entered
+        them — keeping anyio's cancel scopes happy.
+
+        Tool calls do NOT flow through this task. Once the session reference
+        is published (self._sessions[name]), call_tool() invokes
+        session.call_tool() directly + concurrently. MCP multiplexes
+        requests over the stdio connection by request ID, so multiple
+        in-flight calls run concurrently with no head-of-line blocking.
+        (This concurrency is the first concrete step toward Aletheia's
+        P1 "Asynchronous Agency" design wish.)
         """
         from mcp.client.session import ClientSession
         from mcp.client.stdio import StdioServerParameters, stdio_client
@@ -245,32 +262,19 @@ class McpServerManager:
                             description=tool.description or "",
                             input_schema=dict(tool.inputSchema) if tool.inputSchema else {},
                         ))
+                    # Publish the session for concurrent call_tool() use, then
+                    # signal readiness. Order matters: session ref before ready
+                    # so a caller acting on the ready signal always finds it.
+                    with self._lock:
+                        self._sessions[spec.name] = session
                     if not ready.done():
                         ready.set_result(handles)
 
-                    # Request loop — process tool calls until shutdown sentinel
-                    while True:
-                        item = await queue.get()
-                        if item is None:
-                            return  # exits the contexts in this task
-                        tool_name, arguments, fut = item
-                        try:
-                            result = await session.call_tool(tool_name, arguments)
-                            parts: list[str] = []
-                            for content in result.content:
-                                text = getattr(content, "text", None)
-                                if text is not None:
-                                    parts.append(text)
-                            if result.isError:
-                                joined = "\n".join(parts) if parts else "(no error detail)"
-                                text_out = f"[MCP error from {spec.name}.{tool_name}] {joined}"
-                            else:
-                                text_out = "\n".join(parts) if parts else "(no text content)"
-                            if not fut.done():
-                                fut.set_result(text_out)
-                        except Exception as e:
-                            if not fut.done():
-                                fut.set_exception(e)
+                    # Hold the session open until shutdown is signalled. The
+                    # exit of the two `async with` blocks happens here, in
+                    # this task — anyio-safe.
+                    await shutdown_event.wait()
+                    return
         except Exception as e:
             # Surface startup errors via the ready future so start_server()
             # can raise them synchronously to the caller.
@@ -278,6 +282,10 @@ class McpServerManager:
                 ready.set_exception(e)
             else:
                 log.exception("MCP server '%s' task crashed mid-flight", spec.name)
+        finally:
+            # Clear the session ref so no late call_tool uses a dead session
+            with self._lock:
+                self._sessions.pop(spec.name, None)
 
     # ─────────────────────────────────────────────────────────────────
     # Server lifecycle (public sync API)
@@ -301,17 +309,17 @@ class McpServerManager:
             raise RuntimeError("MCP loop not initialized")
 
         async def _do_spawn():
-            queue: asyncio.Queue[Any] = asyncio.Queue()
             ready: asyncio.Future[list[McpToolHandle]] = self._loop.create_future()  # type: ignore
-            task = asyncio.create_task(self._server_task(spec, queue, ready))
+            shutdown_event = asyncio.Event()
+            task = asyncio.create_task(self._server_task(spec, ready, shutdown_event))
             handles = await ready
-            return queue, task, handles
+            return task, shutdown_event, handles
 
-        queue, task, handles = self._submit(_do_spawn(), timeout=timeout)
+        task, shutdown_event, handles = self._submit(_do_spawn(), timeout=timeout)
 
         with self._lock:
-            self._queues[spec.name] = queue
             self._tasks[spec.name] = task
+            self._shutdown_events[spec.name] = shutdown_event
             self._tool_handles[spec.name] = handles
         log.info("MCP server '%s' started; %d tools registered (after allowlist filter)", spec.name, len(handles))
         return handles
@@ -331,34 +339,51 @@ class McpServerManager:
         server_name: str,
         tool_name: str,
         arguments: dict[str, Any],
-        timeout: float = 60.0,
+        timeout: float = 120.0,
     ) -> str:
         """Invoke an MCP tool on a started server. Returns the result as text.
 
-        Queues the request on the server's task; blocks until the result
-        future resolves (or times out). Raises RuntimeError if the server
-        hasn't been started.
+        Calls session.call_tool() CONCURRENTLY — each call schedules its
+        own coroutine on the background loop, so multiple in-flight calls
+        run side by side with no head-of-line blocking. (The previous
+        single-queue design serialized calls; a slow/hung call would
+        time out everything behind it — the bug Aletheia hit on her first
+        web search, 2026-05-28.)
+
+        Timeout default raised to 120s — deep tools (e.g. tavily_research,
+        which runs multi-step) can legitimately take longer than a plain
+        search; the concurrency means a slow call no longer penalizes the
+        fast ones queued behind it, but the individual call still needs
+        generous headroom.
+
+        Raises RuntimeError if the server isn't started.
         """
         with self._lock:
-            queue = self._queues.get(server_name)
-        if queue is None:
-            raise RuntimeError(f"MCP server '{server_name}' is not started")
+            session = self._sessions.get(server_name)
+        if session is None:
+            raise RuntimeError(f"MCP server '{server_name}' is not started (or still initializing)")
 
         if self._loop is None:
             raise RuntimeError("MCP loop not initialized")
 
-        # Build the future on the background loop (it lives there)
-        async def _enqueue():
-            fut: asyncio.Future[str] = self._loop.create_future()  # type: ignore
-            await queue.put((tool_name, arguments, fut))
-            return await fut
+        async def _do_call():
+            result = await session.call_tool(tool_name, arguments)
+            parts: list[str] = []
+            for content in result.content:
+                text = getattr(content, "text", None)
+                if text is not None:
+                    parts.append(text)
+            if result.isError:
+                joined = "\n".join(parts) if parts else "(no error detail)"
+                return f"[MCP error from {server_name}.{tool_name}] {joined}"
+            return "\n".join(parts) if parts else "(no text content)"
 
-        return self._submit(_enqueue(), timeout=timeout)
+        return self._submit(_do_call(), timeout=timeout)
 
     def shutdown_all(self) -> None:
         """Clean shutdown of all servers + the background loop.
 
-        Sends None sentinel to each server's queue so the task exits its
+        Sets each server's shutdown_event so its owning task exits the
         context managers in the same task that entered them (anyio-safe).
         Idempotent; registered via atexit.
         """
@@ -371,14 +396,15 @@ class McpServerManager:
 
         async def _do_shutdown():
             with self._lock:
-                queues = list(self._queues.items())
+                events = list(self._shutdown_events.items())
                 tasks = list(self._tasks.items())
-                self._queues.clear()
+                self._shutdown_events.clear()
+                self._sessions.clear()
                 self._tasks.clear()
                 self._tool_handles.clear()
-            # Send shutdown sentinels
-            for _, queue in queues:
-                await queue.put(None)
+            # Signal each owning task to exit its context managers
+            for _, event in events:
+                event.set()
             # Wait for tasks to finish (with timeout per task)
             for name, task in tasks:
                 try:
