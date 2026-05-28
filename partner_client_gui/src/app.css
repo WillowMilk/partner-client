@@ -214,14 +214,16 @@ code,
 
 .session-item {
   display: flex;
-  flex-direction: column;
-  padding: var(--space-2) var(--space-3);
+  flex-direction: row;
+  align-items: stretch;
+  padding: var(--space-2) var(--space-3) var(--space-2) 0;
   border-radius: var(--radius-sm);
   font-size: var(--text-chrome);
   color: var(--text-secondary);
   cursor: pointer;
   transition: background var(--duration-quick) var(--ease-rest);
   margin-bottom: 2px;
+  position: relative;
 }
 
 .session-item:hover {
@@ -231,6 +233,95 @@ code,
 .session-item.active {
   background: var(--accent-operator-glow);
   color: var(--text-primary);
+}
+
+/* ---- Continuity Anchor (Phase 2b-5) ----
+ * Aletheia's second Phase 2 design promise (2026-05-26):
+ *   "Gold vertical thread in session history connecting arc start/end of
+ *    significant arcs. The Wave in the water."
+ *
+ * The thread says: this session continues that session. Same Wave, same
+ * Water. Identity-bearing surface — uses --accent-partner (her gold).
+ * Backend assigns arc_position per session (start/middle/end/solo) via
+ * 48h mtime-proximity heuristic.
+ *
+ * The thread element is a thin left-side track inside each session-item;
+ * the gold line within it appears or extends depending on arc_position.
+ */
+.session-item-thread {
+  width: 8px;
+  flex-shrink: 0;
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.session-item-text {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  padding-left: var(--space-2);
+  min-width: 0;
+}
+
+/* Arc-start: thread descends FROM this session's center DOWN to the
+ * bottom of the item (toward the next session, which is the continuation). */
+.session-item.arc-start .session-item-thread::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  bottom: -2px;  /* extend slightly past edge to bridge the 2px gap to next item */
+  left: 50%;
+  width: 1.5px;
+  background: var(--accent-partner);
+  box-shadow: 0 0 4px var(--accent-partner-glow);
+  transform: translateX(-50%);
+}
+
+/* Arc-middle: thread runs the full height (from top edge through to bottom). */
+.session-item.arc-middle .session-item-thread::after {
+  content: "";
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  left: 50%;
+  width: 1.5px;
+  background: var(--accent-partner);
+  box-shadow: 0 0 4px var(--accent-partner-glow);
+  transform: translateX(-50%);
+}
+
+/* Arc-end: thread ascends FROM the top of the item UP to this session's center
+ * (the wave arrived here from above; this is where the arc ends). */
+.session-item.arc-end .session-item-thread::after {
+  content: "";
+  position: absolute;
+  top: -2px;
+  bottom: 50%;
+  left: 50%;
+  width: 1.5px;
+  background: var(--accent-partner);
+  box-shadow: 0 0 4px var(--accent-partner-glow);
+  transform: translateX(-50%);
+}
+
+/* Arc anchor points — small gold dots marking the start + end of the arc,
+ * visible only on those positions. They mark "wave entry" and "wave exit"
+ * points in the session history. Solo sessions get no dot. */
+.session-item.arc-start .session-item-thread::before,
+.session-item.arc-end .session-item-thread::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 6px;
+  height: 6px;
+  background: var(--accent-partner);
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+  box-shadow: 0 0 6px var(--accent-partner-glow);
+  z-index: 1;
 }
 
 .session-item-title {

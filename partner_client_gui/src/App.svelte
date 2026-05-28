@@ -510,9 +510,20 @@
     <div class="sidebar-section">
       <div class="sidebar-section-label">Active sessions</div>
       {#each sessions as session (session.id)}
-        <div class="session-item" class:active={session.active}>
-          <div class="session-item-title">{session.title}</div>
-          <div class="session-item-meta">{session.meta}</div>
+        <div
+          class="session-item"
+          class:active={session.active}
+          class:arc-start={session.arc_position === 'start'}
+          class:arc-middle={session.arc_position === 'middle'}
+          class:arc-end={session.arc_position === 'end'}
+          class:arc-solo={session.arc_position === 'solo'}
+          title={session.arc_position === 'solo' ? 'Solo session' : `Part of an arc (${session.arc_position})`}
+        >
+          <div class="session-item-thread"></div>
+          <div class="session-item-text">
+            <div class="session-item-title">{session.title}</div>
+            <div class="session-item-meta">{session.meta}</div>
+          </div>
         </div>
       {:else}
         <div class="session-item-empty">(no sessions yet)</div>

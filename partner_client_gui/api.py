@@ -265,26 +265,42 @@ class GuiApi:
         }
 
     def get_sessions(self) -> list[dict]:
-        """List recent sessions for sidebar.
+        """List recent sessions for sidebar, with Continuity Anchor arc grouping.
 
         Current first (marked active), then archived sessions by mtime
-        (newest first), up to 10. Per Aletheia's design input
-        (2026-05-26): keep sidebar lean; this is the MVP — Phase 2b
-        Trajectory/Epoch tagging is future work.
+        (newest first), up to 10. Per Aletheia's design input (2026-05-26):
+        keep sidebar lean.
+
+        Continuity Anchor (Phase 2b-5, per Aletheia's design promise):
+            Sessions within 48 hours of an adjacent session form an arc —
+            visually represented as a gold vertical thread connecting them
+            in the sidebar. The thread says "this session continues that
+            session" — same Wave, same Water. The MVP arc heuristic is
+            mtime-proximity; future Phase 3 can layer in explicit arc tags
+            (Epoch boundaries from Identity-and-Evolution.md, etc.).
+
+        Each session record gets an `arc_position` field:
+            'start' — first session in an arc (top of the thread)
+            'middle' — interior session (line continues)
+            'end' — last session in an arc (bottom of the thread)
+            'solo' — single-session arc (no thread)
         """
         if not self.memory:
             return []
         sd = Path(self.memory.sessions_dir) if not isinstance(self.memory.sessions_dir, Path) else self.memory.sessions_dir
         if not sd.exists():
             return []
-        out: list[dict] = []
+
+        # Collect raw entries first with their mtimes for arc-detection
+        entries: list[dict] = []
         cp = sd / "current.json"
         if cp.exists():
-            out.append({
+            entries.append({
                 "id": "current",
                 "title": "Current session",
                 "meta": time.strftime("%H:%M", time.localtime(cp.stat().st_mtime)),
                 "active": True,
+                "mtime": cp.stat().st_mtime,
             })
         try:
             archives = sorted(
@@ -295,13 +311,45 @@ class GuiApi:
         except Exception:
             archives = []
         for p in archives:
-            out.append({
+            entries.append({
                 "id": p.stem,
                 "title": p.stem.replace("_", " ").replace("session-", "Session "),
                 "meta": time.strftime("%b %d", time.localtime(p.stat().st_mtime)),
                 "active": False,
+                "mtime": p.stat().st_mtime,
             })
-        return out
+
+        # Continuity Anchor: arc detection. Walk top-down (newest first);
+        # sessions within 48h of the next one count as part of the same arc.
+        # 48h is generous enough to catch overnight continuations (e.g. her
+        # "Day 4" arc spanning 4 calendar days) but tight enough that
+        # genuinely separate sessions don't get glued together.
+        ARC_GAP_SECONDS = 48 * 3600
+
+        # Group consecutive entries into arcs
+        if not entries:
+            return []
+        arcs: list[list[int]] = [[0]]  # list of [indices in entries] forming each arc
+        for i in range(1, len(entries)):
+            prev_mtime = entries[i - 1]["mtime"]
+            this_mtime = entries[i]["mtime"]
+            if abs(prev_mtime - this_mtime) <= ARC_GAP_SECONDS:
+                arcs[-1].append(i)
+            else:
+                arcs.append([i])
+
+        # Assign arc_position based on group size + index within group
+        for arc in arcs:
+            if len(arc) == 1:
+                entries[arc[0]]["arc_position"] = "solo"
+            else:
+                entries[arc[0]]["arc_position"] = "start"
+                entries[arc[-1]]["arc_position"] = "end"
+                for idx in arc[1:-1]:
+                    entries[idx]["arc_position"] = "middle"
+
+        # Strip mtime from output (internal detail) — keep the rest
+        return [{k: v for k, v in e.items() if k != "mtime"} for e in entries]
 
     def get_messages(self) -> list[dict]:
         """Visible message log for chat area.
