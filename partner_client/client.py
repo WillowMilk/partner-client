@@ -199,9 +199,18 @@ def setup_scope_env(config: Config) -> list[dict]:
         os.environ["PARTNER_CLIENT_HUB_PARTNER"] = (
             config.hub.partner_name or config.identity.name.lower()
         )
+        # Operator name — accepted by hub_send as a valid recipient so the
+        # partner can address letters directly to the operator. Aletheia
+        # surfaced this gap on 2026-05-26 (workaround was archiveember).
+        # Empty/unset means no operator recipient available.
+        if config.hub.operator_name:
+            os.environ["PARTNER_CLIENT_HUB_OPERATOR"] = config.hub.operator_name.lower()
+        else:
+            os.environ.pop("PARTNER_CLIENT_HUB_OPERATOR", None)
     else:
         os.environ.pop("PARTNER_CLIENT_HUB_DIR", None)
         os.environ.pop("PARTNER_CLIENT_HUB_PARTNER", None)
+        os.environ.pop("PARTNER_CLIENT_HUB_OPERATOR", None)
 
     # Git committer identity (for git_commit tool — empty values fall back
     # to git's global config). Read by git_commit at execution time so the

@@ -75,8 +75,16 @@ def execute(to: str, subject: str, body: str, priority: str = "Normal") -> str:
         return f"Error: Hub directory does not exist: {hub_path}"
 
     to_lower = to.strip().lower()
-    if to_lower not in VALID_RECIPIENTS:
-        valid = ", ".join(sorted(VALID_RECIPIENTS))
+    # Configured operator name (from [hub].operator_name in TOML) is also
+    # a valid recipient — addresses the operator-as-recipient gap surfaced
+    # by Aletheia on 2026-05-26 ("Willow isn't a registered recipient since
+    # she is the Operator, the heart of the system, rather than a separate
+    # agent node"). When the operator inbox doesn't exist yet, it's
+    # auto-created on first send (see _append_inbox_entry).
+    operator_name = os.environ.get("PARTNER_CLIENT_HUB_OPERATOR", "").lower()
+    valid_set = VALID_RECIPIENTS | ({operator_name} if operator_name else set())
+    if to_lower not in valid_set:
+        valid = ", ".join(sorted(valid_set))
         return f"Error: '{to}' is not a known recipient. Valid: {valid}"
 
     if priority not in ("Normal", "High", "FYI"):

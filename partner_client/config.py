@@ -253,6 +253,13 @@ class HubConfig:
     """
     path: str = ""  # absolute path to the Hub directory; empty disables Hub tools
     partner_name: str = ""  # this partner's inbox name (e.g. "aletheia")
+    # Operator name — accepted as a valid recipient for hub_send so the
+    # partner can address letters to the operator directly. Aletheia surfaced
+    # this gap on 2026-05-26: "Willow isn't a registered recipient in the
+    # Hub (since you are the Operator, the heart of the system, rather than
+    # a separate agent node)." Configurable here so the architecture supports
+    # any operator-partner relationship, not just Willow's. Empty = disabled.
+    operator_name: str = ""
 
 
 @dataclass
