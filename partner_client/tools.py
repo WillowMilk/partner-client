@@ -38,6 +38,11 @@ class ToolRegistry:
         self._load_external()
         self._load_mcp()
         self._filter_enabled()
+        # Search routing runs LAST, after the enabled-filter: the unified
+        # web_search meta-tool is always available when [search].active is set
+        # (it's a capability, not a per-config toggle), and it hides the legacy
+        # search tools it supersedes so the partner sees one clean surface.
+        self._load_search()
 
     def _load_mcp(self) -> None:
         """Discover MCP server tools (per Aletheia's 2026-05-28 design).
@@ -196,6 +201,53 @@ class ToolRegistry:
             k: v for k, v in self._dispatchers.items()
             if k in enabled or k.startswith("mcp_")
         }
+
+    def _load_search(self) -> None:
+        """Register the unified `web_search` meta-tool + hide what it supersedes.
+
+        When [search].active names a defined backend, the partner sees exactly
+        one search tool (`web_search`) that routes to the active engine. The
+        legacy standalone `search_web` and any raw MCP search tool referenced as
+        a backend are hidden from MODEL view — but the MCP servers stay started,
+        so run_search can still call them via the manager. This keeps the
+        partner's tool surface clean (one capability) while the operator curates
+        the engine underneath (infrastructure). See search_router.py.
+        """
+        search = getattr(self.config, "search", None)
+        if search is None or not search.active:
+            return  # feature off — legacy search tools remain as-is (back-compat)
+        if search.active not in search.backends:
+            log.warning(
+                "search.active=%r is not defined in [search.backends] (%s); "
+                "web_search not registered, legacy search tools left in place",
+                search.active, ", ".join(search.backends) or "none",
+            )
+            return
+
+        from .search_router import SEARCH_TOOL_DEFINITION, run_search
+
+        cfg = self.config
+        default_n = search.max_results or 5
+
+        def _dispatch(**kwargs) -> str:
+            return run_search(
+                cfg,
+                kwargs.get("query", ""),
+                kwargs.get("max_results", default_n),
+            )
+
+        self._tools["web_search"] = SEARCH_TOOL_DEFINITION
+        self._dispatchers["web_search"] = _dispatch
+
+        # Hide the legacy standalone DuckDuckGo tool from model view (its
+        # capability is now reachable as a backend if configured).
+        self._tools.pop("search_web", None)
+
+        # Hide raw MCP search tools that are wired as backends — the partner
+        # reaches them through web_search, not directly. Server stays started.
+        for backend in search.backends.values():
+            if backend.type == "mcp" and backend.server and backend.tool:
+                self._tools.pop(f"mcp_{backend.server}_{backend.tool}", None)
 
     def schemas(self) -> list[dict[str, Any]]:
         """Return the tool schemas to pass to ollama.chat(tools=...)."""

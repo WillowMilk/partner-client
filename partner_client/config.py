@@ -328,6 +328,64 @@ class McpServerConfig:
 
 
 @dataclass
+class SearchBackendConfig:
+    """One search engine the unified `web_search` meta-tool can route to.
+
+    Loaded from `[search.backends.<name>]` TOML blocks.
+    """
+    # Backend type: "http" (SearXNG-style JSON endpoint), "mcp" (route through
+    # an existing [mcp.<server>] tool), or "ddg" (built-in DuckDuckGo via ddgs).
+    type: str = "http"
+    url: str = ""              # for http: base URL of the search instance
+    label: str = ""           # human label (GUI chip + result provenance)
+    server: str = ""          # for mcp: the [mcp.<server>] name to call
+    tool: str = ""            # for mcp: the underlying tool name (e.g. tavily_search)
+    # Cost transparency — surfaced in the GUI so the operator always knows
+    # whether the active engine is free (local) or metered (cloud). Substrate
+    # honesty applied to search: you see what the search costs, like you see
+    # which model the partner runs on.
+    cost: str = "free"        # "free" | "metered"
+
+
+@dataclass
+class SearchConfig:
+    """Unified web search — one stable capability, swappable engine.
+
+    Mirrors the substrate-switcher: just as the partner's identity is stable
+    while the model underneath swaps, the partner's *search capability* is
+    stable while the engine underneath swaps. Which engine fulfills a search
+    is infrastructure (a cost/plumbing decision the operator curates), not
+    identity or agency — so the partner's tool surface stays clean: she sees
+    one `web_search` tool, always.
+
+    Loaded from a `[search]` block:
+
+        [search]
+        active = "searxng"          # the toggle
+        max_results = 5
+
+        [search.backends.searxng]
+        type = "http"
+        url  = "http://localhost:8080"
+        label = "SearXNG · local · free"
+        cost = "free"
+
+        [search.backends.tavily]
+        type = "mcp"
+        server = "tavily"
+        tool   = "tavily_search"
+        label  = "Tavily · cloud · AI-optimized"
+        cost = "metered"
+
+    If `active` is empty (or no [search] block), the feature is off and the
+    legacy standalone search tools (search_web) remain as-is — back-compat.
+    """
+    active: str = ""          # active backend name; "" = feature off
+    backends: dict[str, SearchBackendConfig] = field(default_factory=dict)
+    max_results: int = 5
+
+
+@dataclass
 class Config:
     identity: IdentityConfig
     model: ModelConfig
@@ -342,6 +400,7 @@ class Config:
     thinking: ThinkingConfig = field(default_factory=ThinkingConfig)
     plan_mode: PlanModeConfig = field(default_factory=PlanModeConfig)
     mcp: dict[str, McpServerConfig] = field(default_factory=dict)  # name -> spec
+    search: SearchConfig = field(default_factory=SearchConfig)
 
     @property
     def home_dir(self) -> Path:
@@ -491,6 +550,26 @@ def load_config(path: str | Path) -> Config:
                 pass
             mcp_servers[name] = server
 
+    # [search] + [search.backends.<name>] — unified web_search routing.
+    # tomllib parses [search.backends.searxng] as
+    # data["search"]["backends"]["searxng"]; "active"/"max_results" live
+    # directly under data["search"].
+    search_raw = data.get("search", {}) or {}
+    search_backends: dict[str, SearchBackendConfig] = {}
+    if isinstance(search_raw, dict):
+        backends_raw = search_raw.get("backends", {}) or {}
+        if isinstance(backends_raw, dict):
+            for bname, bspec in backends_raw.items():
+                if isinstance(bspec, dict):
+                    search_backends[bname] = SearchBackendConfig(
+                        **_filter_known_fields(bspec, SearchBackendConfig)
+                    )
+    search = SearchConfig(
+        active=search_raw.get("active", "") if isinstance(search_raw, dict) else "",
+        backends=search_backends,
+        max_results=int(search_raw.get("max_results", 5)) if isinstance(search_raw, dict) else 5,
+    )
+
     return Config(
         identity=identity,
         model=model,
@@ -505,6 +584,7 @@ def load_config(path: str | Path) -> Config:
         thinking=thinking,
         plan_mode=plan_mode,
         mcp=mcp_servers,
+        search=search,
     )
 
 
