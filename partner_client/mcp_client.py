@@ -31,10 +31,49 @@ from __future__ import annotations
 import asyncio
 import atexit
 import logging
+import os
+import re
 import threading
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from typing import Any
+
+
+# ${VAR} / ${VAR:-default} reference pattern for env-value expansion.
+# Secrets live in a .env file (loaded into os.environ by config._load_dotenv)
+# or the live shell environment; the TOML references them by name so the
+# config never contains plaintext secrets. Per Willow's 2026-05-28 call:
+# reference > hardcode for reliability + future-proofing + painless rotation.
+_ENV_REF_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
+
+
+def _expand_env_refs(env: dict[str, str]) -> dict[str, str]:
+    """Expand ${VAR} and ${VAR:-default} references in env-dict values
+    against os.environ. Unset vars with no default expand to empty string
+    (and log a warning — a missing API key is worth surfacing). Values
+    without references pass through unchanged.
+    """
+    expanded: dict[str, str] = {}
+    for key, value in env.items():
+        if not isinstance(value, str):
+            expanded[key] = value
+            continue
+
+        def _sub(m: "re.Match[str]") -> str:
+            var_name = m.group(1)
+            default = m.group(2)
+            if var_name in os.environ:
+                return os.environ[var_name]
+            if default is not None:
+                return default
+            log.warning(
+                "MCP env reference ${%s} is unset (no .env entry, no shell var); "
+                "expanding to empty string", var_name
+            )
+            return ""
+
+        expanded[key] = _ENV_REF_RE.sub(_sub, value)
+    return expanded
 
 # Lazy import inside methods so partner-client without [mcp] sections
 # doesn't pay the import cost. The mcp package brings in pydantic, httpx,
@@ -162,10 +201,34 @@ class McpServerManager:
         from mcp.client.stdio import StdioServerParameters, stdio_client
 
         try:
+            # Expand ${VAR} references in env values against os.environ
+            # (populated from the .env file by config._load_dotenv + the
+            # live shell environment). The MCP subprocess receives the
+            # resolved secrets without them ever living in the TOML.
+            #
+            # CRITICAL: merge the spec env OVER the inherited default
+            # environment (PATH, HOME, etc.) rather than replacing it.
+            # StdioServerParameters with a bare {TAVILY_API_KEY: ...} dict
+            # would strip PATH and break `npx`/`uvx` launchers. We start
+            # from the MCP SDK's get_default_environment() (a safety-filtered
+            # subset of the parent env) and overlay the resolved secrets.
+            resolved_env = None
+            if spec.env:
+                try:
+                    from mcp.client.stdio import get_default_environment
+                    base_env = dict(get_default_environment())
+                except Exception:
+                    # Fallback: pass through the parent's PATH + HOME at minimum
+                    base_env = {
+                        k: v for k, v in os.environ.items()
+                        if k in ("PATH", "HOME", "USER", "SHELL", "LANG", "TMPDIR")
+                    }
+                base_env.update(_expand_env_refs(spec.env))
+                resolved_env = base_env
             params = StdioServerParameters(
                 command=spec.command,
                 args=spec.args,
-                env=spec.env or None,
+                env=resolved_env,
             )
             async with stdio_client(params) as (read, write):
                 async with ClientSession(read, write) as session:

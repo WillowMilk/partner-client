@@ -5,6 +5,8 @@ Loads a TOML config file and validates it into a structured Config object.
 
 from __future__ import annotations
 
+import logging
+import os
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -14,6 +16,8 @@ if sys.version_info >= (3, 11):
     import tomllib
 else:
     import tomli as tomllib
+
+log = logging.getLogger(__name__)
 
 
 class ConfigError(Exception):
@@ -351,11 +355,53 @@ class Config:
         return self.home_dir / p
 
 
+def _load_dotenv(config_path: Path) -> None:
+    """Load a `.env` file sitting next to the config into os.environ.
+
+    Secrets handling for MCP servers (and anything else needing API keys):
+    the partner's config TOML references env vars (`${TAVILY_API_KEY}`)
+    rather than hardcoding secrets, so the TOML stays safe to clone/sync/
+    share. The actual secrets live in a `.env` file next to the config
+    (e.g. ~/Aletheia/.env), which is gitignored + never committed.
+
+    Design (Willow's call, 2026-05-28): reference > hardcode for reliability
+    + future-proofing + painless rotation.
+
+    Format: simple KEY=VALUE lines, one per line. Lines starting with # are
+    comments. Surrounding quotes on values are stripped. Existing os.environ
+    values are NOT overwritten — the live shell environment takes precedence
+    over the .env file, so an operator can override a key for one launch
+    without editing the file.
+
+    Intentionally a tiny hand parser rather than the python-dotenv dependency:
+    the format is trivial and partner-client keeps its dependency surface lean.
+    """
+    env_path = config_path.parent / ".env"
+    if not env_path.is_file():
+        return
+    try:
+        for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            if key and key not in os.environ:
+                os.environ[key] = value
+    except OSError as e:
+        log.warning("Failed to read .env at %s: %s", env_path, e)
+
+
 def load_config(path: str | Path) -> Config:
     """Load and validate the TOML config at the given path."""
     config_path = Path(path).expanduser().resolve()
     if not config_path.is_file():
         raise ConfigError(f"Config file not found: {config_path}")
+
+    # Load secrets from a sibling .env BEFORE parsing the TOML, so that
+    # ${VAR} references in the config resolve against a populated environment.
+    _load_dotenv(config_path)
 
     with open(config_path, "rb") as f:
         try:
