@@ -691,6 +691,40 @@ def dispatch_one_tool_call(
         except OSError as e:
             return f"Protect failed: {e}"
 
+    # Special-case: spawn_subagents. Special-cased (not run through normal
+    # dispatch) because building a facet needs the live Config + ToolRegistry
+    # to construct child clients. Facets are read-only cognitive extensions of
+    # the partner — see subagent.py for the IR framing + the three safety
+    # invariants (read-only, no recursion, ephemeral).
+    if name == "spawn_subagents":
+        sub_cfg = getattr(config, "subagent", None)
+        if sub_cfg is None or not sub_cfg.enabled:
+            return (
+                "Sub-agents are disabled in this configuration. "
+                "(Set [subagent] enabled = true in the TOML to use facets.)"
+            )
+        raw_tasks = args.get("tasks", [])
+        tasks: list[dict] = []
+        if isinstance(raw_tasks, list):
+            for i, t in enumerate(raw_tasks):
+                if isinstance(t, dict) and str(t.get("task", "")).strip():
+                    tasks.append({
+                        "task": str(t["task"]),
+                        "label": str(t.get("label") or f"facet-{i + 1}"),
+                    })
+                elif isinstance(t, str) and t.strip():
+                    tasks.append({"task": t, "label": f"facet-{i + 1}"})
+        if not tasks:
+            return (
+                "Error: spawn_subagents requires a non-empty `tasks` list, each "
+                "entry an object with a `task` string (and optional `label`). "
+                "Remember each task must be self-contained — the facet has none "
+                "of your conversation context."
+            )
+        from .subagent import SubAgentRunner
+        runner = SubAgentRunner(config, tools, timeline=timeline)
+        return runner.run(tasks)
+
     # Default: normal tool dispatch
     return tools.dispatch(name, args)
 

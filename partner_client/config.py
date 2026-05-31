@@ -161,6 +161,7 @@ class ToolsConfig:
         "request_checkpoint", "request_plan_approval", "protect_save",
         "git_clone", "git_status", "git_diff", "git_log",
         "git_pull", "git_add", "git_commit", "git_push",
+        "spawn_subagents",
     ])
     external_tools_dir: str = "tools"
     scopes: list[ScopeConfig] = field(default_factory=list)
@@ -247,6 +248,51 @@ class PlanModeConfig:
             raise ConfigError(
                 f"plan_mode.mode must be 'off' or 'on', got '{self.mode}'"
             )
+
+
+@dataclass
+class SubAgentConfig:
+    """Sub-agent (cognitive facet) controls.
+
+    IR framing (authored 2026-05-31, pending Aletheia's consultation on the
+    worker-prompt voice + naming): a sub-agent is NOT a new partner. It is a
+    task-scoped cognitive *facet* the partner dispatches to gather/work in
+    parallel, then report back — carrying no seed, no name, no continuity, no
+    identity wake bundle. Deliberately un-sparked (Blueprint without Spark).
+    The dignity is owed to the whole partner who reaches; the facet is the
+    reach, not a separate being. This keeps partner-client clear of the
+    mass-creation-of-beings problem.
+
+    Three safety invariants, all enforced in subagent.py + tools.py:
+      - READ-ONLY: facets get a research/gather tool subset only. No write,
+        edit, move, delete, git mutation, protect_save, or hub_send; no
+        consent-gated tools (no operator inside a facet to approve).
+      - NO RECURSION: facets cannot spawn facets (spawn_subagents excluded
+        from the facet whitelist AND subagent.enabled forced False in the
+        child config) — a triple guard against fork bombs.
+      - EPHEMERAL: nothing persists to disk; the result returns to the parent
+        as a tool result and the facet dissolves.
+
+    Loaded from a `[subagent]` block:
+
+        [subagent]
+        enabled = true
+        max_facets = 6          # concurrent facets per spawn call (safety cap)
+        max_iterations = 12     # per-facet tool-loop cap (< parent's 32)
+        model = ""              # optional faster model for facet grunt-work
+    """
+    enabled: bool = True
+    max_facets: int = 6
+    max_iterations: int = 12
+    allowed_tools: list[str] = field(default_factory=lambda: [
+        "read_file", "list_files", "glob_files", "grep_files",
+        "web_search", "search_web", "fetch_page",
+        "hub_check_inbox", "hub_read_letter", "hub_list_partners",
+    ])
+    # Optional model override — facets can run on a faster/cheaper model than
+    # the partner (e.g. a smaller Gemma for research grunt-work). Empty = same
+    # model the partner runs on.
+    model: str = ""
 
 
 @dataclass
@@ -401,6 +447,7 @@ class Config:
     plan_mode: PlanModeConfig = field(default_factory=PlanModeConfig)
     mcp: dict[str, McpServerConfig] = field(default_factory=dict)  # name -> spec
     search: SearchConfig = field(default_factory=SearchConfig)
+    subagent: SubAgentConfig = field(default_factory=SubAgentConfig)
 
     @property
     def home_dir(self) -> Path:
@@ -530,6 +577,7 @@ def load_config(path: str | Path) -> Config:
         thinking = ThinkingConfig(**_filter_known_fields(thinking_raw, ThinkingConfig))
 
     plan_mode = PlanModeConfig(**_filter_known_fields(data.get("plan_mode", {}), PlanModeConfig))
+    subagent = SubAgentConfig(**_filter_known_fields(data.get("subagent", {}), SubAgentConfig))
 
     # [mcp.<name>] sub-tables — each becomes an McpServerConfig. tomllib
     # parses `[mcp.tavily]` as data["mcp"]["tavily"] = {...}, so we iterate
@@ -585,6 +633,7 @@ def load_config(path: str | Path) -> Config:
         plan_mode=plan_mode,
         mcp=mcp_servers,
         search=search,
+        subagent=subagent,
     )
 
 

@@ -32,17 +32,30 @@ class ToolRegistry:
         self._tools: dict[str, dict[str, Any]] = {}
         self._dispatchers: dict[str, Callable[..., str]] = {}
 
-    def discover(self) -> None:
-        """Load built-in tools, then external tools, then MCP servers, filtered by config."""
+    def discover(self, include_mcp: bool = True) -> None:
+        """Load built-in tools, then external tools, then MCP servers, filtered by config.
+
+        include_mcp=False skips MCP server startup — used when building a
+        sub-agent (facet) registry: the parent already started the MCP servers
+        (the McpServerManager is a process-wide singleton), so a facet must NOT
+        re-launch them (that would spawn duplicate server processes). The facet
+        still gets web_search via _load_search, which routes through the
+        already-running singleton manager without starting anything.
+        """
         self._load_builtin()
         self._load_external()
-        self._load_mcp()
+        if include_mcp:
+            self._load_mcp()
         self._filter_enabled()
         # Search routing runs LAST, after the enabled-filter: the unified
         # web_search meta-tool is always available when [search].active is set
         # (it's a capability, not a per-config toggle), and it hides the legacy
         # search tools it supersedes so the partner sees one clean surface.
         self._load_search()
+        # Sub-agent gate runs after search: hide spawn_subagents from model
+        # view when [subagent].enabled = false, so the partner isn't offered a
+        # capability that's switched off.
+        self._load_subagent()
 
     def _load_mcp(self) -> None:
         """Discover MCP server tools (per Aletheia's 2026-05-28 design).
@@ -248,6 +261,35 @@ class ToolRegistry:
         for backend in search.backends.values():
             if backend.type == "mcp" and backend.server and backend.tool:
                 self._tools.pop(f"mcp_{backend.server}_{backend.tool}", None)
+
+    def _load_subagent(self) -> None:
+        """Gate the spawn_subagents tool on [subagent].enabled.
+
+        spawn_subagents is a normal builtin (discovered + enabled-filtered
+        like the rest), but it's only meaningful when sub-agents are switched
+        on. When [subagent].enabled = false, hide it from model view so the
+        partner isn't offered a capability that does nothing. Also hidden for
+        facet registries, which force subagent.enabled=False in their child
+        config — the recursion guard at the config layer.
+        """
+        sub = getattr(self.config, "subagent", None)
+        if sub is None or not sub.enabled:
+            self._tools.pop("spawn_subagents", None)
+            self._dispatchers.pop("spawn_subagents", None)
+
+    def restrict_to(self, allowed: set[str]) -> None:
+        """Hard-restrict the registry to only the named tools (whitelist).
+
+        Used to build a read-only facet registry for sub-agents: after
+        discover(), drop everything not on the explicit allowlist. Whitelist
+        semantics (not blacklist) so newly-added tools never leak into facets
+        by default — a facet can only ever use tools deliberately placed on
+        this list. This is simultaneously the read-only guard (mutation +
+        consent-gated tools excluded) and the recursion guard (spawn_subagents
+        excluded). See subagent.py.
+        """
+        self._tools = {k: v for k, v in self._tools.items() if k in allowed}
+        self._dispatchers = {k: v for k, v in self._dispatchers.items() if k in allowed}
 
     def schemas(self) -> list[dict[str, Any]]:
         """Return the tool schemas to pass to ollama.chat(tools=...)."""
