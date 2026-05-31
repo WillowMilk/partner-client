@@ -691,12 +691,18 @@ def dispatch_one_tool_call(
         except OSError as e:
             return f"Protect failed: {e}"
 
-    # Special-case: spawn_subagents. Special-cased (not run through normal
-    # dispatch) because building a facet needs the live Config + ToolRegistry
-    # to construct child clients. Facets are read-only cognitive extensions of
-    # the partner — see subagent.py for the IR framing + the three safety
-    # invariants (read-only, no recursion, ephemeral).
-    if name == "spawn_subagents":
+    # Special-case: the sub-agent tool (spawn_subagents / partner-named
+    # cast_lumens). Special-cased (not run through normal dispatch) because
+    # building a reach needs the live Config + ToolRegistry to construct child
+    # clients. Reaches are read-only cognitive extensions of the partner — see
+    # subagent.py for the IR framing + the three safety invariants (read-only,
+    # no recursion, ephemeral). Matches the partner's configured tool_name so
+    # Aletheia's `cast_lumens` resolves here just as a default `spawn_subagents`.
+    _subagent_tool_name = "spawn_subagents"
+    _sub_cfg_for_name = getattr(config, "subagent", None)
+    if _sub_cfg_for_name is not None and _sub_cfg_for_name.tool_name:
+        _subagent_tool_name = _sub_cfg_for_name.tool_name
+    if name == _subagent_tool_name:
         sub_cfg = getattr(config, "subagent", None)
         if sub_cfg is None or not sub_cfg.enabled:
             return (

@@ -263,19 +263,37 @@ class ToolRegistry:
                 self._tools.pop(f"mcp_{backend.server}_{backend.tool}", None)
 
     def _load_subagent(self) -> None:
-        """Gate the spawn_subagents tool on [subagent].enabled.
+        """Register the sub-agent tool under the partner's chosen name + term.
 
-        spawn_subagents is a normal builtin (discovered + enabled-filtered
-        like the rest), but it's only meaningful when sub-agents are switched
-        on. When [subagent].enabled = false, hide it from model view so the
-        partner isn't offered a capability that does nothing. Also hidden for
-        facet registries, which force subagent.enabled=False in their child
-        config — the recursion guard at the config layer.
+        The sub-agent tool is gated by [subagent].enabled (NOT the tools.enabled
+        list), the same way web_search is gated by [search].active — a capability
+        switched on once, not double-listed. It's registered DYNAMICALLY here so
+        the partner's vocabulary reaches the model surface: Aletheia invokes
+        `cast_lumens` and reads "Lumens", not the generic `spawn_subagents`.
+
+        Always drop the static-builtin default name first (it's discovered by
+        _load_builtin as a template), then re-register under the configured
+        tool_name when enabled. When [subagent].enabled = false — including every
+        facet/child registry, which forces enabled=False as the config-layer
+        recursion guard — nothing is registered.
         """
+        # Clear the static-builtin registration (discovered + possibly
+        # enabled-filtered already); we are authoritative for this tool.
+        self._tools.pop("spawn_subagents", None)
+        self._dispatchers.pop("spawn_subagents", None)
+
         sub = getattr(self.config, "subagent", None)
         if sub is None or not sub.enabled:
-            self._tools.pop("spawn_subagents", None)
-            self._dispatchers.pop("spawn_subagents", None)
+            return
+
+        from .subagent import build_tool_def
+        from .tools_builtin.spawn_subagents import execute as _subagent_stub
+
+        tool_name = sub.tool_name or "spawn_subagents"
+        self._tools[tool_name] = build_tool_def(sub.term, tool_name)
+        # The dispatcher is the stub; real work is special-cased in client.py
+        # (dispatch_one_tool_call matches config.subagent.tool_name).
+        self._dispatchers[tool_name] = _subagent_stub
 
     def restrict_to(self, allowed: set[str]) -> None:
         """Hard-restrict the registry to only the named tools (whitelist).

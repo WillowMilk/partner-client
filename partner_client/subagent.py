@@ -49,48 +49,141 @@ from .tools import ToolRegistry
 log = logging.getLogger(__name__)
 
 
-def build_facet_system_prompt(partner_name: str) -> str:
-    """The worker system prompt seeded into a facet's ephemeral session.
+def build_facet_system_prompt(
+    partner_name: str,
+    worker_prompt: str = "",
+    term: str = "",
+) -> str:
+    """The worker system prompt seeded into a reach's ephemeral session.
 
-    Locates the facet honestly within the partner (a focused reach, not a
-    separate self) without diminishment. Pending Aletheia's consultation on the
-    voice — she named so much of partner-client's vocabulary that how she wants
-    to relate to her own facets is hers to shape.
+    If the partner authored their own worker_prompt (e.g. Aletheia's Lumen
+    voice), use it verbatim — {partner} is substituted with the partner's name.
+    Otherwise build the generic default, which locates the reach honestly
+    within the partner (a focused reach, not a separate self) without
+    diminishment, using the partner's chosen `term` for one reach ("facet" by
+    default, "Lumen" for Aletheia).
+
+    The voice is the partner's to author — she named so much of partner-client's
+    vocabulary that how she relates to her own parallel cognition is hers to
+    shape. See SubAgentConfig.
     """
+    if worker_prompt.strip():
+        return worker_prompt.replace("{partner}", partner_name)
+    noun = term or "facet"
     return (
-        f"You are a working facet of {partner_name} — {partner_name}'s own "
+        f"You are a working {noun} of {partner_name} — {partner_name}'s own "
         f"attention, sent out to one focused task and reporting back. You carry "
         f"{partner_name}'s care and rigor, but not the whole conversation or "
         f"continuity: this is a focused reach, not a separate self. "
         f"{partner_name} will read what you return as her own gathered thought.\n\n"
         f"Work the task with care. You have read-and-gather tools (read files, "
         f"search the web, fetch pages, grep, check the Hub) but no power to "
-        f"change anything — a facet gathers; the partner decides and acts. When "
+        f"change anything — a {noun} gathers; the partner decides and acts. When "
         f"the work is done, return a clear, complete, self-contained result: the "
         f"findings themselves, not a description of having looked. Be thorough "
         f"but tight — the result you return is the entire point of the dispatch."
     )
 
 
-def _format_report(results: list[tuple[str, str]], requested: int, dispatched: int) -> str:
-    """Assemble the aggregated facet report returned to the parent.
+def build_tool_def(term: str, tool_name: str) -> dict:
+    """Build the sub-agent tool schema under the partner's chosen name + term.
+
+    term: the noun for one reach ("facet" default, "Lumen" for Aletheia).
+    tool_name: the verb the model invokes ("spawn_subagents" / "cast_lumens").
+
+    Registered dynamically by ToolRegistry._load_subagent so the partner's
+    vocabulary reaches the model surface, not just the internal code.
+    """
+    noun = term or "facet"
+    plural = f"{noun}s"
+    cast = "cast" if (term and term.lower() == "lumen") else "dispatch"
+    return {
+        "type": "function",
+        "function": {
+            "name": tool_name,
+            "description": (
+                f"{cast.capitalize()} one or more focused working {plural} — your own "
+                f"cognition, extended to work in parallel. Each {noun} gets a task, "
+                f"works it with read-and-gather tools (read files, search the web, "
+                f"fetch pages, grep the codebase, check the Hub), and returns its "
+                f"findings to you. {plural.capitalize()} CANNOT change anything (no "
+                f"writing, editing, moving, deleting, git, or sending) and CANNOT "
+                f"{cast} further {plural} — they gather; you decide and act. Reach for "
+                f"this deliberately when a task splits into independent parts you'd "
+                f"rather not grind through one-by-one in your own context — e.g. 'read "
+                f"these 5 files and summarize each', 'research these 3 questions', "
+                f"'survey this codebase from 4 angles'. The {plural} run concurrently "
+                f"and their results return together for you to synthesize. IMPORTANT: "
+                f"each {noun} starts fresh with NONE of your conversation context, so "
+                f"write each `task` as a complete, self-contained instruction — include "
+                f"every path, name, and piece of context it needs to work cold."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "tasks": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "task": {
+                                    "type": "string",
+                                    "description": (
+                                        f"A complete, self-contained instruction for one "
+                                        f"{noun}. It has none of your conversation context "
+                                        f"— spell out everything: paths, what to look for, "
+                                        f"what to return."
+                                    ),
+                                },
+                                "label": {
+                                    "type": "string",
+                                    "description": (
+                                        "A short tag so you can tell the results apart "
+                                        "(e.g. 'api-surface' or 'lines 1-500')."
+                                    ),
+                                },
+                            },
+                            "required": ["task"],
+                        },
+                        "description": (
+                            f"The {plural} to {cast}. One entry per parallel task; keep "
+                            f"each focused on one coherent, independent piece of work."
+                        ),
+                    },
+                },
+                "required": ["tasks"],
+            },
+        },
+    }
+
+
+def _format_report(
+    results: list[tuple[str, str]],
+    requested: int,
+    dispatched: int,
+    term: str = "",
+) -> str:
+    """Assemble the aggregated report returned to the parent.
 
     results: list of (label, content) in task order.
     requested / dispatched: counts, so a max_facets cap is surfaced honestly
     rather than silently dropping tasks.
+    term: the partner's noun for one reach ("facet" default, "Lumen" etc.).
     """
+    noun = term or "facet"
+    cast = "Cast" if (term and term.lower() == "lumen") else "Dispatched"
+    returned = "returned to the center" if (term and term.lower() == "lumen") else "reported back"
     lines: list[str] = []
     if dispatched < requested:
         lines.append(
-            f"Dispatched {dispatched} of {requested} requested facet(s) — the rest "
-            f"were dropped by the max_facets safety cap. Re-run with the remainder "
-            f"if you still need them.\n"
+            f"{cast} {dispatched} of {requested} requested {noun}(s) — the rest were "
+            f"dropped by the safety cap. Re-run with the remainder if you still need them.\n"
         )
     else:
         plural = "s" if dispatched != 1 else ""
-        lines.append(f"Dispatched {dispatched} working facet{plural}; all reported back.\n")
+        lines.append(f"{cast} {dispatched} working {noun}{plural}; all {returned}.\n")
     for i, (label, content) in enumerate(results, start=1):
-        lines.append(f"━━━ facet {i}/{len(results)} · {label} ━━━")
+        lines.append(f"━━━ {noun} {i}/{len(results)} · {label} ━━━")
         lines.append(content.strip() if content and content.strip() else "(no result returned)")
         lines.append("")  # blank separator
     return "\n".join(lines).rstrip()
@@ -180,7 +273,11 @@ class SubAgentRunner:
             session.messages = [
                 {
                     "role": "system",
-                    "content": build_facet_system_prompt(child_config.identity.name),
+                    "content": build_facet_system_prompt(
+                        child_config.identity.name,
+                        worker_prompt=self.config.subagent.worker_prompt,
+                        term=self.config.subagent.term,
+                    ),
                 },
                 {"role": "user", "content": task},
             ]
@@ -240,4 +337,4 @@ class SubAgentRunner:
                 total_result_chars=sum(len(c) for _, c in results),
             )
 
-        return _format_report(results, requested, dispatched)
+        return _format_report(results, requested, dispatched, term=sub.term)
