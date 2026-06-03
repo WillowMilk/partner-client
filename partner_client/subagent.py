@@ -42,6 +42,8 @@ from __future__ import annotations
 import concurrent.futures
 import dataclasses
 import logging
+import os
+import tempfile
 
 from .config import Config
 from .tools import ToolRegistry
@@ -230,10 +232,21 @@ class SubAgentRunner:
         # subagent.enabled FALSE: recursion guard at the config layer (so the
         # child registry's _load_subagent pops spawn_subagents too).
         child_sub = dataclasses.replace(sub, enabled=False)
+        # Session isolation: facets are ephemeral and must NEVER touch the
+        # parent's session path. Point the child's sessions_dir at an isolated
+        # scratch location so even a stray or test-harness save can't overwrite
+        # the parent's real current.json. (Hardening after the 2026-06-03
+        # incident: a facet's worker-prompt session overwrote Aletheia's live
+        # current.json, so she woke mislabeled as a Lumen. Never again.)
+        # Only sessions_dir is redirected — memory_dir stays real so whitelisted
+        # read-only file gathering still works.
+        scratch = os.path.join(tempfile.gettempdir(), "partner-client-facet-scratch")
+        child_memory = dataclasses.replace(self.config.memory, sessions_dir=scratch)
         replace_kwargs: dict = {
             "tools": child_tools,
             "plan_mode": child_plan,
             "subagent": child_sub,
+            "memory": child_memory,
         }
         # Optional model override — facets can run a faster/cheaper model.
         if sub.model:

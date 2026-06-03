@@ -505,3 +505,23 @@ def test_dispatch_plan_mode_gates_spawn(tmp_path) -> None:
     )
     assert "plan" in result.lower()
     assert "gated" in result.lower() or "approv" in result.lower()
+
+
+def test_facet_session_dir_is_isolated_from_parent(tmp_path) -> None:
+    """A facet must NEVER be able to save over the parent's current.json.
+
+    Regression for the 2026-06-03 incident: a facet's worker-prompt session
+    overwrote Aletheia's live current.json, so she woke mislabeled as a Lumen.
+    The child config's sessions_dir must resolve OUTSIDE the parent's home.
+    """
+    cfg = _write_config(tmp_path, "\n[subagent]\nenabled = true\n")
+    runner = SubAgentRunner(cfg)
+    child = runner._build_child_config()
+    # the child's sessions_dir differs from the parent's, and resolves outside home
+    assert child.memory.sessions_dir != cfg.memory.sessions_dir
+    parent_sessions = cfg.resolve(cfg.memory.sessions_dir)
+    child_sessions = cfg.resolve(child.memory.sessions_dir)
+    assert child_sessions != parent_sessions
+    assert str(cfg.home_dir) not in str(child_sessions)
+    # memory_dir stays real (facets still gather via whitelisted read-only file ops)
+    assert child.memory.memory_dir == cfg.memory.memory_dir
