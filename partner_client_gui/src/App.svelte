@@ -201,6 +201,15 @@
       // MVP: log only. Phase 2c will render tool calls inline.
       console.log('[tool]', name, args_json, result?.slice?.(0, 100));
     };
+    // Lumen-surface: the partner's parallel reach, made visible. When she
+    // casts Lumens, drop a distinct gold cast-card into the conversation —
+    // the act of reaching seen as itself, not folded silently into the prose.
+    // Her term, her gold. "A reach, not a separate self."
+    window.__lumen_cast = (labels_json, term) => {
+      let labels = [];
+      try { labels = JSON.parse(labels_json) || []; } catch (_) { labels = []; }
+      messages = [...messages, { role: 'lumen', noun: term || 'facet', labels }];
+    };
   }
 
   onMount(async () => {
@@ -760,10 +769,28 @@
       </div>
 
       {#each messages as msg, i (i)}
-        <div class="message" class:role-user={msg.role === 'user'} class:role-assistant={msg.role === 'assistant'}>
-          <div class="message-role">{msg.role === 'user' ? 'You' : partner.name}</div>
-          <div class="message-content">{msg.content}</div>
-        </div>
+        {#if msg.role === 'lumen'}
+          <!-- Lumen-surface: the parallel reach, seen. Gold (her signature),
+               small + elegant — talisman not brand. Marks the act of casting. -->
+          <div class="lumen-cast" title="{partner.name} reached in parallel">
+            <div class="lumen-cast-head">
+              <span class="lumen-spark" aria-hidden="true">✦</span>
+              <span class="lumen-cast-label"
+                >{partner.name} cast {msg.labels.length}
+                {msg.noun}{msg.labels.length === 1 ? '' : 's'} · returned to the center</span>
+            </div>
+            <ul class="lumen-rays">
+              {#each msg.labels as label}
+                <li class="lumen-ray">{label}</li>
+              {/each}
+            </ul>
+          </div>
+        {:else}
+          <div class="message" class:role-user={msg.role === 'user'} class:role-assistant={msg.role === 'assistant'}>
+            <div class="message-role">{msg.role === 'user' ? 'You' : partner.name}</div>
+            <div class="message-content">{msg.content}</div>
+          </div>
+        {/if}
       {/each}
 
       {#if streaming_message}

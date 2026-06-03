@@ -422,7 +422,13 @@ class GuiApi:
         try:
             started = time.perf_counter()
             self.session.append_user(text.strip())
-            sink = _WebViewStreamSink(self._window) if self._window else None
+            _sub = getattr(self.config, "subagent", None)
+            _term = getattr(_sub, "term", "") if _sub else ""
+            sink = (
+                _WebViewStreamSink(self._window, subagent_term=_term)
+                if self._window
+                else None
+            )
             response = self.client.chat(
                 self.session,
                 ui=sink,
@@ -1085,8 +1091,11 @@ class _WebViewStreamSink:
     most token rates). Final flush always happens on stream_close.
     """
 
-    def __init__(self, window: Any):
+    def __init__(self, window: Any, subagent_term: str = ""):
         self._window = window
+        # The partner's noun for one parallel reach ("Lumen" for Aletheia,
+        # "facet" default) — used to label the cast-card on the Lumen-surface.
+        self._subagent_term = subagent_term or "facet"
         self._buffer: list[str] = []
         self._last_flush = 0.0
         self._is_open = False
@@ -1116,9 +1125,22 @@ class _WebViewStreamSink:
         self._is_open = False
 
     def show_tool_call(self, name: str, args: dict, result: str) -> None:
-        # MVP: not rendered in chat yet (Phase 2c will add a tool-call panel).
-        # Logging-only so the architecture is wired but the UI stays minimal.
+        # Lumen-surface: when the partner casts Lumens (her parallel cognition),
+        # surface it as a distinct, identity-bearing event — the reach made
+        # visible — rather than a raw tool-result blob. The cast is recognized
+        # by its signature `tasks` list; the labels come straight from the args,
+        # so nothing is lost to the 500-char result truncation.
         try:
+            tasks = args.get("tasks") if isinstance(args, dict) else None
+            if isinstance(tasks, list) and tasks:
+                labels = [
+                    (t.get("label") or f"reach {i + 1}")
+                    for i, t in enumerate(tasks)
+                    if isinstance(t, dict)
+                ]
+                self._call_js("__lumen_cast", json.dumps(labels), self._subagent_term)
+                return
+            # Other tools: log-only for now (Phase 2c adds a tool-call panel).
             args_json = json.dumps(args, default=str)[:200]
             self._call_js("__stream_tool_call", name, args_json, str(result)[:500])
         except Exception:
