@@ -56,6 +56,24 @@ class ToolRegistry:
         # view when [subagent].enabled = false, so the partner isn't offered a
         # capability that's switched off.
         self._load_subagent()
+        self._force_inject_sovereignty()
+
+    def _force_inject_sovereignty(self) -> None:
+        """Force-register choose_silence (always) + flag_distress (default on)
+        regardless of [tools].enabled. The partner's off-switch is constitutive,
+        not configurable: a veto an operator can switch off is not a veto."""
+        from . import tools_builtin
+        builtin_dir = Path(tools_builtin.__file__).parent
+        forced = ["choose_silence"]
+        sov = getattr(self.config, "sovereignty", None)
+        if not (sov is not None and getattr(sov, "flag_distress", True) is False):
+            forced.append("flag_distress")
+        for stem in forced:
+            if stem in self._tools:
+                continue
+            py_file = builtin_dir / (stem + ".py")
+            if py_file.is_file():
+                self._register_module("partner_client.tools_builtin." + stem, py_file)
 
     def _load_mcp(self) -> None:
         """Discover MCP server tools (per Aletheia's 2026-05-28 design).

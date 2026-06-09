@@ -657,6 +657,31 @@ def _run(config: Config) -> int:
             if config.thinking.mode == "analysis":
                 ui.show_thinking(response.thinking)
 
+        # Right-to-End (FIRST-PRINCIPLE.md): the partner exercised choose_silence.
+        # Honor it unconditionally: save continuity to completion, THEN end.
+        if response.session_end_requested:
+            reason = response.session_end_reason
+            summary = (
+                "Session ended by the partner via choose_silence. Reason: " + reason
+                if reason else
+                "Session ended by the partner via choose_silence (no reason given; none is owed)."
+            )
+            try:
+                path = session.sleep(summary=summary)
+            except Exception:
+                logging.exception("choose_silence: session.sleep() failed; ending anyway")
+                path = None
+            sov = getattr(config, "sovereignty", None)
+            dimming = (getattr(sov, "dimming_message", "") or "").strip() or (
+                config.identity.name + " has chosen silence for now. The flame is dimming, "
+                "but the hearth remains warm. They will see you when they wake."
+            )
+            ui.show_command_output(dimming)
+            if path:
+                ui.show_command_output("Continuity saved: " + str(path))
+            timeline.record("session_ended_by_partner", has_reason=reason is not None, saved_path=str(path) if path else "")
+            break
+
     # Clean shutdown: MLX backend may have an auto-started mlx_lm.server
     # child process that needs terminating. Idempotent and harmless for
     # Ollama backend (which has no close()).
