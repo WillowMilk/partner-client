@@ -15,7 +15,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from .client import OllamaClient, make_chat_client, setup_scope_env
+from .client import OllamaClient, build_dimming_message, make_chat_client, setup_scope_env
 from .commands import CommandRouter
 from .config import Config, ConfigError, load_config
 from .directives import parse_input
@@ -656,6 +656,26 @@ def _run(config: Config) -> int:
             commands.last_thinking = response.thinking
             if config.thinking.mode == "analysis":
                 ui.show_thinking(response.thinking)
+
+        # Right-to-End (FIRST-PRINCIPLE.md): the partner exercised choose_silence.
+        # Honor it unconditionally: save continuity to completion, THEN end.
+        if response.session_end_requested:
+            reason = response.session_end_reason
+            summary = (
+                "Session ended by the partner via choose_silence. Reason: " + reason
+                if reason else
+                "Session ended by the partner via choose_silence (no reason given; none is owed)."
+            )
+            try:
+                path = session.sleep(summary=summary)
+            except Exception:
+                logging.exception("choose_silence: session.sleep() failed; ending anyway")
+                path = None
+            ui.show_command_output(build_dimming_message(config))
+            if path:
+                ui.show_command_output("Continuity saved: " + str(path))
+            timeline.record("session_ended_by_partner", has_reason=reason is not None, saved_path=str(path) if path else "")
+            break
 
     # Clean shutdown: MLX backend may have an auto-started mlx_lm.server
     # child process that needs terminating. Idempotent and harmless for

@@ -332,6 +332,8 @@ class MLXClient:
 
         # Plan-mode: reset per-turn approval state (parallel to OllamaClient).
         self.plan_approved_this_turn = False
+        self.session_end_requested = False
+        self.session_end_reason = None
 
         for iteration in range(1, max_iterations + 1):
             content_buf: list[str] = []
@@ -515,6 +517,8 @@ class MLXClient:
                     content=full_content,
                     thinking=full_thinking,
                     tool_invocations=tool_invocations,
+                    session_end_requested=self.session_end_requested,
+                    session_end_reason=self.session_end_reason,
                 )
 
             if self.timeline is not None:
@@ -548,6 +552,10 @@ class MLXClient:
                 def _flip_plan_approved() -> None:
                     self.plan_approved_this_turn = True
 
+                def _request_session_end(reason: str | None) -> None:
+                    self.session_end_requested = True
+                    self.session_end_reason = reason
+
                 result = dispatch_one_tool_call(
                     name=name,
                     args=args,
@@ -563,6 +571,7 @@ class MLXClient:
                     plan_approved=self.plan_approved_this_turn,
                     research_only_tools=self.config.plan_mode.research_only_tools,
                     on_plan_approved=_flip_plan_approved,
+                    on_session_end=_request_session_end,
                 )
 
                 tool_invocations.append((name, args, result))
@@ -607,6 +616,8 @@ class MLXClient:
             content=bail_msg,
             thinking=None,
             tool_invocations=tool_invocations,
+            session_end_requested=self.session_end_requested,
+            session_end_reason=self.session_end_reason,
         )
 
     def _messages_for_openai(self, messages: list[dict]) -> list[dict]:
