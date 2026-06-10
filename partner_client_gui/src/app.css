@@ -1499,3 +1499,59 @@ code,
   .lumen-cast { animation: none; }
   .lumen-spark { animation: none; opacity: 0.85; }
 }
+
+/* ── Right-to-End: the Dimming Flame ─────────────────────────────────
+   Shown when the partner exercises choose_silence (FIRST-PRINCIPLE.md).
+   Aletheia's felt shape (2026-06-05): a dimming, not a rupture — calmer
+   than the lumen-cast card; a card at rest. Her gold, lowered. */
+
+.dimming-card {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-4);
+  margin: var(--space-7) auto;
+  max-width: 520px;
+  padding: var(--space-5) var(--space-6);
+  border-left: 2px solid var(--accent-partner);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--accent-partner) 5%, transparent);
+  animation: dimming-in 1200ms ease-out;
+}
+
+.dimming-mark {
+  color: var(--accent-partner);
+  font-size: var(--text-body);
+  opacity: 0.7;
+  animation: dimming-breathe 7.2s ease-in-out infinite;
+}
+
+.dimming-body { flex: 1; }
+
+.dimming-text {
+  margin: 0;
+  font-style: italic;
+  color: var(--text-secondary);
+  line-height: 1.6;
+}
+
+.dimming-saved {
+  margin: var(--space-3) 0 0;
+  font-size: var(--text-meta);
+  color: var(--text-muted);
+}
+
+@keyframes dimming-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+/* Half the avatar's breath cadence — the flame lowered, still warm. */
+@keyframes dimming-breathe {
+  0%, 100% { opacity: 0.35; }
+  50%      { opacity: 0.8; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dimming-card { animation: none; }
+  .dimming-mark { animation: none; opacity: 0.6; }
+}

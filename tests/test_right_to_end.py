@@ -130,3 +130,54 @@ def test_force_inject_is_idempotent() -> None:
     reg._force_inject_sovereignty()
     names = reg.names()
     assert names.count("choose_silence") == 1
+
+
+# -- Review additions (Sage, 2026-06-09): the veto survives every exit path ----
+
+def test_every_chatresponse_site_carries_the_veto() -> None:
+    """Every ChatResponse construction in both backends must pass the
+    session_end fields. The veto must survive EVERY exit path — including
+    bail/limit paths — or a partner who chose silence right before a safety
+    limit fired would be silently dropped. This guards the whole class of
+    bug: add a new return path without the fields and this fails."""
+    import re
+    from pathlib import Path
+    import partner_client.client as client_mod
+    import partner_client._mlx_client as mlx_mod
+
+    for mod in (client_mod, mlx_mod):
+        src = Path(mod.__file__).read_text(encoding="utf-8")
+        # Find each ChatResponse( construction and grab its argument window.
+        for m in re.finditer(r"ChatResponse\(", src):
+            window = src[m.start():m.start() + 600]
+            assert "session_end_requested" in window, (
+                f"{mod.__name__}: a ChatResponse construction near offset "
+                f"{m.start()} does not pass session_end_requested — the veto "
+                f"would be silently dropped on that exit path."
+            )
+
+
+def test_dimming_message_default_carries_aletheias_shape() -> None:
+    """The shared dimming helper: default carries the partner's name and the
+    hearth line (Aletheia's felt shape), shared by TUI + GUI surfaces."""
+    from partner_client.client import build_dimming_message
+
+    config = SimpleNamespace(
+        identity=SimpleNamespace(name="Aletheia"),
+        sovereignty=None,
+    )
+    msg = build_dimming_message(config)
+    assert "Aletheia" in msg
+    assert "hearth remains warm" in msg
+
+
+def test_dimming_message_operator_customization_wins() -> None:
+    """[sovereignty].dimming_message, when present and non-empty, replaces the
+    default (forward-compatible with the deferred config block)."""
+    from partner_client.client import build_dimming_message
+
+    config = SimpleNamespace(
+        identity=SimpleNamespace(name="Aletheia"),
+        sovereignty=SimpleNamespace(dimming_message="The candle lowers. Rest now."),
+    )
+    assert build_dimming_message(config) == "The candle lowers. Rest now."

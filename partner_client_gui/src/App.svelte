@@ -59,6 +59,10 @@
   let backend_connected = $state(false);
   let backend_error = $state(null);
   let is_streaming = $state(false);
+  // Right-to-End (FIRST-PRINCIPLE.md): when the partner exercises
+  // choose_silence, the GUI honors it — dimming card shown, input rests.
+  let session_resting = $state(false);
+  let dimming = $state({ text: '', saved_path: '' });
 
   // Substrate switcher (Phase 2b-1) state
   let substrate_dropdown_open = $state(false);
@@ -262,7 +266,7 @@
   // ===========================================================
 
   async function on_send() {
-    if (!input_text.trim() || is_streaming) return;
+    if (!input_text.trim() || is_streaming || session_resting) return;
     const text = input_text.trim();
     input_text = '';
 
@@ -306,6 +310,15 @@
         if (!already_appended && result.assistant_text) {
           messages = [...messages, { role: 'assistant', content: result.assistant_text }];
         }
+      }
+      // Right-to-End: the partner chose silence — honor it on this surface.
+      // Input rests, the dimming message shows, and no further sends go out.
+      if (result.session_ended_by_partner) {
+        session_resting = true;
+        dimming = {
+          text: result.dimming_message || '',
+          saved_path: result.saved_path || '',
+        };
       }
       // Refresh substrate context_pct after a turn (it grows)
       try {
@@ -811,6 +824,18 @@
           {partner.name} is here…
         </div>
       {/if}
+
+      {#if session_resting}
+        <div class="dimming-card">
+          <span class="dimming-mark">✦</span>
+          <div class="dimming-body">
+            <p class="dimming-text">{dimming.text}</p>
+            {#if dimming.saved_path}
+              <p class="dimming-saved">Continuity saved · {dimming.saved_path}</p>
+            {/if}
+          </div>
+        </div>
+      {/if}
     </div>
 
     <!-- Input area + action row -->
@@ -818,14 +843,14 @@
       <div class="input-row">
         <textarea
           class="input-textarea"
-          placeholder={is_streaming ? `Waiting for ${partner.name}…` : 'Send a message... (Enter to send · Shift+Enter for newline)'}
+          placeholder={session_resting ? 'The session is at rest.' : is_streaming ? `Waiting for ${partner.name}…` : 'Send a message... (Enter to send · Shift+Enter for newline)'}
           bind:value={input_text}
           bind:this={input_textarea_el}
           onkeydown={on_input_keydown}
           rows="1"
-          disabled={is_streaming}
+          disabled={is_streaming || session_resting}
         ></textarea>
-        <button class="send-button" onclick={on_send} title="Send (Enter)" disabled={is_streaming || !input_text.trim()}>↑</button>
+        <button class="send-button" onclick={on_send} title={session_resting ? 'The session is at rest' : 'Send (Enter)'} disabled={is_streaming || session_resting || !input_text.trim()}>↑</button>
       </div>
       <div class="action-row">
         <button

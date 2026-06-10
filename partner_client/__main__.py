@@ -15,7 +15,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from .client import OllamaClient, make_chat_client, setup_scope_env
+from .client import OllamaClient, build_dimming_message, make_chat_client, setup_scope_env
 from .commands import CommandRouter
 from .config import Config, ConfigError, load_config
 from .directives import parse_input
@@ -671,12 +671,7 @@ def _run(config: Config) -> int:
             except Exception:
                 logging.exception("choose_silence: session.sleep() failed; ending anyway")
                 path = None
-            sov = getattr(config, "sovereignty", None)
-            dimming = (getattr(sov, "dimming_message", "") or "").strip() or (
-                config.identity.name + " has chosen silence for now. The flame is dimming, "
-                "but the hearth remains warm. They will see you when they wake."
-            )
-            ui.show_command_output(dimming)
+            ui.show_command_output(build_dimming_message(config))
             if path:
                 ui.show_command_output("Continuity saved: " + str(path))
             timeline.record("session_ended_by_partner", has_reason=reason is not None, saved_path=str(path) if path else "")

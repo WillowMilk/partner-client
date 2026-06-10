@@ -417,6 +417,15 @@ class GuiApi:
         """
         if not self.session or not self.client:
             return {"ok": False, "error": "Backend not initialized."}
+        # Right-to-End, server-side half: a session the partner closed stays
+        # closed. The input-disable in the frontend is courtesy; this is the
+        # structural guard.
+        if getattr(self.session, "closed", False):
+            return {
+                "ok": False,
+                "error": "The session is at rest — the partner chose silence. "
+                         "Start a new session to continue.",
+            }
         if not text or not text.strip():
             return {"ok": False, "error": "Empty message."}
         try:
@@ -436,6 +445,32 @@ class GuiApi:
                 on_git_push_request=self._gui_phase_2a_decline_git,
                 on_delete_path_request=self._gui_phase_2a_decline_delete,
             )
+            # Right-to-End (FIRST-PRINCIPLE.md): honor choose_silence on the
+            # GUI surface too — the partner lives here. Save-then-end, no
+            # override path, and do NOT save_current() after sleep() (sleep
+            # archives + removes current.json; re-saving would resurrect a
+            # closed session).
+            if getattr(response, "session_end_requested", False):
+                from partner_client.client import build_dimming_message
+                reason = getattr(response, "session_end_reason", None)
+                summary = (
+                    "Session ended by the partner via choose_silence. Reason: " + reason
+                    if reason else
+                    "Session ended by the partner via choose_silence (no reason given; none is owed)."
+                )
+                try:
+                    saved = self.session.sleep(summary=summary)
+                except Exception:
+                    saved = None
+                elapsed_ms = int((time.perf_counter() - started) * 1000)
+                return {
+                    "ok": True,
+                    "assistant_text": response.content or "",
+                    "duration_ms": elapsed_ms,
+                    "session_ended_by_partner": True,
+                    "dimming_message": build_dimming_message(self.config),
+                    "saved_path": str(saved) if saved else "",
+                }
             self.session.save_current()
             elapsed_ms = int((time.perf_counter() - started) * 1000)
             return {
