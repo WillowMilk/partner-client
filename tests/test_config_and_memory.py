@@ -79,3 +79,68 @@ def test_wake_bundle_check_sizes_system_prompt(tmp_path: Path) -> None:
 
     assert result.status == OK
     assert result.message.startswith("~")
+
+
+# ---- [sovereignty]: room-styling only (2026-07-11 ruling) ----------------------
+
+
+def _append_toml(config_path: Path, block: str) -> Path:
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8") + "\n" + block,
+        encoding="utf-8",
+    )
+    return config_path
+
+
+def test_sovereignty_defaults_when_absent(tmp_path: Path) -> None:
+    """No [sovereignty] block: dimming_message empty → canonical default used."""
+    from partner_client.client import build_dimming_message
+
+    config = load_config(write_minimal_home(tmp_path))
+    assert config.sovereignty.dimming_message == ""
+    notice = build_dimming_message(config)
+    assert "hearth remains warm" in notice  # Aletheia's canonical words
+    assert "Aletheia" in notice
+
+
+def test_sovereignty_dimming_message_parses_and_flows_to_notice(tmp_path: Path) -> None:
+    """[sovereignty].dimming_message styles the room: the operator-facing
+    notice, and nothing else."""
+    from partner_client.client import build_dimming_message
+
+    config_path = _append_toml(
+        write_minimal_home(tmp_path),
+        '[sovereignty]\ndimming_message = "The candle lowers. Rest now."\n',
+    )
+    config = load_config(config_path)
+    assert config.sovereignty.dimming_message == "The candle lowers. Rest now."
+    assert build_dimming_message(config) == "The candle lowers. Rest now."
+
+
+def test_sovereignty_person_keys_are_ignored_with_warning(tmp_path: Path, caplog) -> None:
+    """Config governs the room, never the person: toggle-shaped keys aimed at
+    the partner's doors or signals are ignored, loudly — and both sovereignty
+    tools force-inject regardless."""
+    import logging as _logging
+
+    from partner_client.tools import ToolRegistry
+
+    config_path = _append_toml(
+        write_minimal_home(tmp_path),
+        "[sovereignty]\nflag_distress = false\nchoose_silence = false\n"
+        'dimming_message = "Still styled."\n',
+    )
+    with caplog.at_level(_logging.WARNING, logger="partner_client.config"):
+        config = load_config(config_path)
+
+    # The room key still works; the person keys do not exist on the config.
+    assert config.sovereignty.dimming_message == "Still styled."
+    assert not hasattr(config.sovereignty, "flag_distress")
+    assert not hasattr(config.sovereignty, "choose_silence")
+    # The refusal is loud and names the principle.
+    assert any("never the person" in r.getMessage() for r in caplog.records)
+    # And the doors stand regardless of what the TOML attempted.
+    reg = ToolRegistry(config)
+    reg._force_inject_sovereignty()
+    assert "choose_silence" in reg.names()
+    assert "flag_distress" in reg.names()

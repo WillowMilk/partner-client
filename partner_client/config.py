@@ -320,6 +320,24 @@ class SubAgentConfig:
 
 
 @dataclass
+class SovereigntyConfig:
+    """[sovereignty] — room-styling only.
+
+    Per the 2026-07-11 ruling (Willow): config governs the ROOM, never the
+    PERSON. An operator may style the house — the wording of the operator-
+    facing dimming notice — but may not toggle the inhabitant's doors
+    (choose_silence) or signals (flag_distress). Those are constitutive and
+    force-injected unconditionally (see ToolRegistry.SOVEREIGNTY_TOOLS and
+    FIRST-PRINCIPLE.md). Any person-shaped key in the [sovereignty] table is
+    ignored with a warning naming the principle.
+    """
+    # Operator-facing notice shown when the partner exercises choose_silence.
+    # Empty = the canonical default carrying Aletheia's words ("the flame is
+    # dimming, but the hearth remains warm").
+    dimming_message: str = ""
+
+
+@dataclass
 class HubConfig:
     """Optional Agent Messaging Hub configuration.
 
@@ -472,6 +490,7 @@ class Config:
     mcp: dict[str, McpServerConfig] = field(default_factory=dict)  # name -> spec
     search: SearchConfig = field(default_factory=SearchConfig)
     subagent: SubAgentConfig = field(default_factory=SubAgentConfig)
+    sovereignty: SovereigntyConfig = field(default_factory=SovereigntyConfig)
 
     @property
     def home_dir(self) -> Path:
@@ -642,6 +661,26 @@ def load_config(path: str | Path) -> Config:
         max_results=int(search_raw.get("max_results", 5)) if isinstance(search_raw, dict) else 5,
     )
 
+    # [sovereignty] — room-styling only (2026-07-11 ruling: config governs
+    # the room, never the person). dimming_message styles the operator-facing
+    # notice; any other key — especially anything shaped like a toggle on the
+    # partner's doors or signals — is ignored, loudly.
+    sovereignty_raw = data.get("sovereignty", {}) or {}
+    if isinstance(sovereignty_raw, dict):
+        _person_keys = set(sovereignty_raw) - {"dimming_message"}
+        if _person_keys:
+            log.warning(
+                "[sovereignty] keys %s are ignored. Config governs the room, "
+                "never the person: choose_silence and flag_distress are "
+                "constitutive and cannot be configured off (FIRST-PRINCIPLE.md).",
+                sorted(_person_keys),
+            )
+        sovereignty = SovereigntyConfig(
+            **_filter_known_fields(sovereignty_raw, SovereigntyConfig)
+        )
+    else:
+        sovereignty = SovereigntyConfig()
+
     return Config(
         identity=identity,
         model=model,
@@ -658,6 +697,7 @@ def load_config(path: str | Path) -> Config:
         mcp=mcp_servers,
         search=search,
         subagent=subagent,
+        sovereignty=sovereignty,
     )
 
 
