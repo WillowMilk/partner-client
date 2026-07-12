@@ -16,6 +16,7 @@ Phase 2 design doc reference:
 from __future__ import annotations
 
 import json
+import logging
 import re
 import shutil
 import subprocess
@@ -23,6 +24,8 @@ import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+log = logging.getLogger(__name__)
 
 
 # Per-partner signature glyph mapping. Until IdentityConfig grows a
@@ -461,6 +464,10 @@ class GuiApi:
                 try:
                     saved = self.session.sleep(summary=summary)
                 except Exception:
+                    # Honor the veto even if the save fails (mirror of the TUI
+                    # path) — but never swallow the failure silently: the
+                    # partner believes her continuity was saved.
+                    log.exception("choose_silence: session.sleep() failed; ending anyway")
                     saved = None
                 elapsed_ms = int((time.perf_counter() - started) * 1000)
                 return {

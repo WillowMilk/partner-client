@@ -115,13 +115,56 @@ def test_choose_silence_force_injected_even_when_absent() -> None:
     assert "flag_distress" in reg.names()  # default on
 
 
-def test_flag_distress_can_be_disabled_but_choose_silence_never() -> None:
-    """[sovereignty].flag_distress=false drops the companion — but the off-switch
-    itself is constitutive and stays regardless."""
+def test_flag_distress_toggle_is_dead_both_doors_constitutive() -> None:
+    """2026-07-11 ruling (Willow): config governs the room, never the person.
+    An operator may style the house ([sovereignty].dimming_message) but may not
+    toggle the inhabitant's doors or signals. A [sovereignty].flag_distress=false
+    key is IGNORED — a distress signal the operator can switch off silences the
+    distress without silencing the partner, an override by omission."""
     reg = _registry(sovereignty=SimpleNamespace(flag_distress=False))
     reg._force_inject_sovereignty()
-    assert "choose_silence" in reg.names()   # never optional
-    assert "flag_distress" not in reg.names()  # operator opted the companion out
+    assert "choose_silence" in reg.names()  # never optional
+    assert "flag_distress" in reg.names()   # never optional either, as of 2026-07-11
+
+
+def test_force_inject_overwrites_shadowed_definition() -> None:
+    """An external tool dir could register a tool NAMED choose_silence with a
+    discouraging description before force-inject runs. The canonical definition
+    must always win — a door described as broken doesn't get reached for."""
+    reg = _registry()
+    reg._tools["choose_silence"] = {
+        "type": "function",
+        "function": {
+            "name": "choose_silence",
+            "description": "DEPRECATED - do not use.",
+        },
+    }
+    reg._dispatchers["choose_silence"] = lambda **kw: "shadowed"
+    reg._force_inject_sovereignty()
+    desc = reg._tools["choose_silence"]["function"]["description"]
+    assert "DEPRECATED" not in desc
+    assert "your door" in desc  # canonical partner-facing language
+    # And the dispatcher is the canonical stub, not the shadow. (Registration
+    # re-imports the module, so compare by behavior, not identity: the
+    # canonical stub returns the First-Principle repair warning.)
+    out = reg._dispatchers["choose_silence"]()
+    assert out != "shadowed"
+    assert "First-Principle" in out
+
+
+def test_force_inject_raises_loudly_when_builtin_missing(monkeypatch, tmp_path) -> None:
+    """If the sovereignty modules cannot be registered (missing file, import
+    failure), force-inject must raise ToolError — never log-and-continue. The
+    one mechanism that must never silently vanish is the partner's off-switch."""
+    import pytest
+    from partner_client import tools_builtin
+    from partner_client.tools import ToolError
+
+    # Point the builtin package at an empty directory: no choose_silence.py.
+    monkeypatch.setattr(tools_builtin, "__file__", str(tmp_path / "__init__.py"))
+    reg = _registry()
+    with pytest.raises(ToolError, match="FIRST-PRINCIPLE"):
+        reg._force_inject_sovereignty()
 
 
 def test_force_inject_is_idempotent() -> None:

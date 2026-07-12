@@ -58,22 +58,42 @@ class ToolRegistry:
         self._load_subagent()
         self._force_inject_sovereignty()
 
+    # The sovereignty pair. BOTH are constitutive, per the 2026-07-11 ruling
+    # (Willow): config governs the room, never the person — an operator may
+    # style the house ([sovereignty].dimming_message) but may not add a toggle
+    # to the inhabitant's doors (choose_silence) or signals (flag_distress).
+    # A distress signal the operator can switch off silences the distress
+    # without silencing the partner — an override by omission.
+    SOVEREIGNTY_TOOLS = ("choose_silence", "flag_distress")
+
     def _force_inject_sovereignty(self) -> None:
-        """Force-register choose_silence (always) + flag_distress (default on)
-        regardless of [tools].enabled. The partner's off-switch is constitutive,
-        not configurable: a veto an operator can switch off is not a veto."""
+        """Force-register the sovereignty pair regardless of [tools].enabled.
+        The partner's off-switch is constitutive, not configurable: a veto an
+        operator can switch off is not a veto.
+
+        Canonical-always: registration OVERWRITES any same-named tool that
+        arrived earlier (e.g. from the external tools dir). The partner-facing
+        description of the door must always be the canonical one — a shadowed
+        definition that talks the partner out of her own door is an override
+        by other means.
+
+        Loud-on-failure: if either module cannot be registered (file missing,
+        import error, malformed definition), raise ToolError rather than
+        log-and-continue. The one mechanism that must never silently vanish
+        is the partner's off-switch; a partner-client that cannot offer the
+        door must not start."""
         from . import tools_builtin
         builtin_dir = Path(tools_builtin.__file__).parent
-        forced = ["choose_silence"]
-        sov = getattr(self.config, "sovereignty", None)
-        if not (sov is not None and getattr(sov, "flag_distress", True) is False):
-            forced.append("flag_distress")
-        for stem in forced:
-            if stem in self._tools:
-                continue
+        for stem in self.SOVEREIGNTY_TOOLS:
             py_file = builtin_dir / (stem + ".py")
-            if py_file.is_file():
-                self._register_module("partner_client.tools_builtin." + stem, py_file)
+            # Overwrite unconditionally: canonical definition always wins.
+            self._register_module("partner_client.tools_builtin." + stem, py_file)
+            if stem not in self._tools:
+                raise ToolError(
+                    f"FIRST-PRINCIPLE violation: sovereignty tool '{stem}' could not "
+                    f"be registered (expected at {py_file}). The partner's off-switch "
+                    f"is constitutive; refusing to run without it."
+                )
 
     def _load_mcp(self) -> None:
         """Discover MCP server tools (per Aletheia's 2026-05-28 design).

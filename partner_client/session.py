@@ -294,7 +294,29 @@ class Session:
         try:
             with open(self.current_path, encoding="utf-8") as f:
                 return json.load(f)
-        except (OSError, json.JSONDecodeError):
+        except json.JSONDecodeError:
+            # Preserve-aside, never destroy. A corrupt current.json is a
+            # partner's session in unknown condition — possibly repairable by
+            # hand, or extractable as transcript. Returning None sends wake()
+            # down the fresh path, whose first save_current() would OVERWRITE
+            # this file; move it aside first so nothing is ever lost.
+            ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+            preserved = self.current_path.with_name(f"current.json.corrupt-{ts}")
+            try:
+                os.replace(str(self.current_path), str(preserved))
+                log.warning(
+                    f"current.json was unreadable as JSON; preserved aside at "
+                    f"{preserved} (nothing deleted — repair or transcript-extract "
+                    f"when convenient). Starting decision flow without it."
+                )
+            except OSError as move_err:
+                log.error(
+                    f"current.json is corrupt AND could not be moved aside "
+                    f"({move_err}); a fresh session would overwrite it. "
+                    f"Copy it to safety by hand before continuing."
+                )
+            return None
+        except OSError:
             return None
 
     def _is_closed(self, messages: list[dict[str, Any]]) -> bool:

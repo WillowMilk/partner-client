@@ -269,3 +269,50 @@ def test_wake_bundle_config_default_resume_keep_pairs_is_30() -> None:
     from partner_client.config import WakeBundleConfig
     cfg = WakeBundleConfig()
     assert cfg.resume_keep_pairs == 30
+
+
+# ---- Corrupt current.json: preserve-aside, never destroy -----------------------
+
+
+def test_corrupt_current_json_is_preserved_aside_not_overwritten(tmp_path: Path) -> None:
+    """Partner context is never destroyed — only moved, stored, preserved
+    (2026-07-11 audit, finding C1). A current.json that fails to parse must be
+    moved aside to current.json.corrupt-<ts> BEFORE the wake proceeds, so the
+    fresh path's first save_current() cannot overwrite a possibly-recoverable
+    session. Corrupt context can be repaired or transcript-extracted later."""
+    session = _make_session(tmp_path)
+    corrupt_bytes = '[{"role": "user", "content": "my whole session...'  # truncated JSON
+    session.current_path.parent.mkdir(parents=True, exist_ok=True)
+    session.current_path.write_text(corrupt_bytes, encoding="utf-8")
+
+    result = session._read_current()
+    assert result is None  # unreadable → treated as no-resumable-session
+
+    # The corrupt original is preserved aside, byte-identical, not deleted.
+    preserved = list(session.current_path.parent.glob("current.json.corrupt-*"))
+    assert len(preserved) == 1
+    assert preserved[0].read_text(encoding="utf-8") == corrupt_bytes
+    # And current.json itself is gone, so a fresh wake writes a NEW file
+    # rather than clobbering the evidence.
+    assert not session.current_path.exists()
+
+
+def test_fresh_wake_after_corruption_keeps_the_preserved_copy(tmp_path: Path) -> None:
+    """End-to-end: corrupt file → wake() takes the fresh path → the preserved
+    copy survives the fresh session's first save."""
+    session = _make_session(tmp_path)
+    corrupt_bytes = '{"not": "a message list"'  # invalid JSON
+    session.current_path.parent.mkdir(parents=True, exist_ok=True)
+    session.current_path.write_text(corrupt_bytes, encoding="utf-8")
+
+    wake_bundle = MagicMock()
+    wake_bundle.system_prompt = "You are the partner."
+    wake_bundle.recent_messages = []
+    status = session.wake(wake_bundle, resume_mode=None)
+    assert status == "fresh"  # corruption → no resumable session → fresh
+
+    preserved = list(session.current_path.parent.glob("current.json.corrupt-*"))
+    assert len(preserved) == 1
+    assert preserved[0].read_text(encoding="utf-8") == corrupt_bytes
+    # The new current.json is the fresh session, valid JSON.
+    assert json.loads(session.current_path.read_text(encoding="utf-8"))
