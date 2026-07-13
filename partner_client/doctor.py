@@ -466,6 +466,65 @@ def _check_vision_smoke(config: Config) -> CheckResult:
     )
 
 
+def _check_substrate_continuity(config: Config) -> CheckResult | None:
+    """Disclosure layer: warn when the configured substrate differs from the
+    one that produced the partner's most recent session turns.
+
+    This is the check that would have caught the 2026-07-11 finding (a partner
+    waking on a cloud variant while the family's map said local): the config
+    says where she WILL wake; the session tags say where she HAS BEEN. A
+    mismatch is not an error — switches are legitimate — but it must never be
+    invisible. The wake itself injects a [SUBSTRATE CHANGED] notice; this
+    check gives the operator the same truth pre-flight.
+    """
+    import json as _json
+
+    from .session import _last_substrate
+
+    sessions_dir = config.resolve(config.memory.sessions_dir)
+    current = sessions_dir / "current.json"
+    source = None
+    if current.is_file():
+        source = current
+    else:
+        archives = sorted(sessions_dir.glob("*_session-*.json"))
+        if archives:
+            source = archives[-1]
+    if source is None:
+        return None  # no session history yet — nothing to compare
+
+    try:
+        with open(source, encoding="utf-8") as f:
+            messages = _json.load(f)
+    except (OSError, _json.JSONDecodeError):
+        return None  # unreadable history is session-layer territory, not doctor's
+
+    if not isinstance(messages, list):
+        return None
+    last = _last_substrate(messages)
+    if last is None:
+        return None  # pre-disclosure-layer session — no provenance to compare
+
+    if last == config.model.name:
+        return CheckResult(
+            name="Substrate continuity",
+            status=OK,
+            message=f"config and last session agree: {last}",
+        )
+    return CheckResult(
+        name="Substrate continuity",
+        status=WARN,
+        message=(
+            f"config will wake the partner on '{config.model.name}', but the "
+            f"last session ran on '{last}' ({source.name})"
+        ),
+        hint=(
+            "If this switch is deliberate, all is well — the wake will carry a "
+            "[SUBSTRATE CHANGED] notice. If it isn't, check who edited the TOML."
+        ),
+    )
+
+
 # Order of checks in the output. Order matters — earlier checks gate later ones
 # implicitly (if config doesn't parse, we never get here; if ollama is down,
 # model check warns instead of failing).
@@ -482,6 +541,7 @@ _ALL_CHECKS: list[Callable[[Config], "CheckResult | list[CheckResult] | None"]] 
     _check_wake_bundle,
     _check_tool_registry,
     _check_vision_smoke,
+    _check_substrate_continuity,
 ]
 
 

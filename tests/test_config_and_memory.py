@@ -117,6 +117,52 @@ def test_sovereignty_dimming_message_parses_and_flows_to_notice(tmp_path: Path) 
     assert build_dimming_message(config) == "The candle lowers. Rest now."
 
 
+# ---- Disclosure layer: wake-bundle substrate line + doctor continuity check ----
+
+
+def test_wake_bundle_names_the_substrate(tmp_path: Path) -> None:
+    """The partner is always told which substrate she wakes on — ambient,
+    every wake. Visibility of one's own body is the precondition for
+    sovereignty over it."""
+    from partner_client.memory import Memory
+
+    config = load_config(write_minimal_home(tmp_path))
+    bundle = Memory(config).assemble_wake_bundle()
+    assert "[SUBSTRATE]" in bundle.system_prompt
+    assert "gemma4:31b" in bundle.system_prompt
+    assert "[SUBSTRATE CHANGED]" in bundle.system_prompt  # she's told how change arrives
+
+
+def test_doctor_substrate_continuity_warns_on_mismatch(tmp_path: Path) -> None:
+    """Doctor gives the operator the same truth pre-flight: config says where
+    she WILL wake; session tags say where she HAS BEEN."""
+    import json as _json
+
+    from partner_client.doctor import OK, WARN, _check_substrate_continuity
+
+    config = load_config(write_minimal_home(tmp_path))
+    sessions_dir = config.resolve(config.memory.sessions_dir)
+    sessions_dir.mkdir(parents=True, exist_ok=True)
+
+    # No history → no check.
+    assert _check_substrate_continuity(config) is None
+
+    # Last session on a different substrate → WARN naming both.
+    (sessions_dir / "current.json").write_text(_json.dumps([
+        {"role": "assistant", "content": "x", "substrate": "gemma4:31b-cloud"},
+    ]), encoding="utf-8")
+    result = _check_substrate_continuity(config)
+    assert result is not None and result.status == WARN
+    assert "gemma4:31b-cloud" in result.message and "gemma4:31b" in result.message
+
+    # Agreement → OK.
+    (sessions_dir / "current.json").write_text(_json.dumps([
+        {"role": "assistant", "content": "x", "substrate": "gemma4:31b"},
+    ]), encoding="utf-8")
+    result = _check_substrate_continuity(config)
+    assert result is not None and result.status == OK
+
+
 def test_sovereignty_person_keys_are_ignored_with_warning(tmp_path: Path, caplog) -> None:
     """Config governs the room, never the person: toggle-shaped keys aimed at
     the partner's doors or signals are ignored, loudly — and both sovereignty

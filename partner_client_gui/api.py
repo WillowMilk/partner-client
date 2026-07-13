@@ -608,6 +608,9 @@ class GuiApi:
         if not toml_path.is_file():
             return {"ok": False, "error": f"Config file not found at {toml_path}"}
 
+        # Captured pre-rewrite for the disclosure change-note (Step 4.5).
+        old_model = self.config.model.name
+
         # Step 1-2: timestamped backup
         try:
             timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -626,6 +629,26 @@ class GuiApi:
             tmp_path.replace(toml_path)
         except Exception as e:
             return {"ok": False, "error": f"TOML write failed: {e}"}
+
+        # Step 4.5 — disclosure layer: leave a change-note so the next wake's
+        # [SUBSTRATE CHANGED] notice carries provenance (who, why) instead of
+        # "no note was left". Non-fatal on failure: the session-layer
+        # detection still fires from the substrate tags alone.
+        try:
+            note = {
+                "from": old_model,
+                "to": new_model,
+                "initiator": "operator (GUI substrate switcher)",
+                "reason": "deliberate switch via the desk; conversation is where consent lives",
+                "ts": datetime.now().isoformat(),
+            }
+            note_path = self.session.memory.sessions_dir / ".substrate-change-note.json"
+            note_path.parent.mkdir(parents=True, exist_ok=True)
+            note_tmp = note_path.with_suffix(".json.tmp")
+            note_tmp.write_text(json.dumps(note, indent=2), encoding="utf-8")
+            note_tmp.replace(note_path)
+        except Exception:
+            log.exception("substrate change-note write failed (notice will lack provenance)")
 
         # Step 5: archive current session so the next wake is fresh
         try:

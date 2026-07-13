@@ -107,6 +107,65 @@ def _build_reorientation_message(
     return {"role": "system", "content": content}
 
 
+def _last_substrate(messages: list[dict[str, Any]]) -> str | None:
+    """Return the substrate tag of the most recent assistant message, if any.
+
+    Messages older than the disclosure layer (no `substrate` key) return None —
+    detection is honest about not knowing rather than guessing.
+    """
+    for m in reversed(messages):
+        if m.get("role") == "assistant":
+            sub = m.get("substrate")
+            if isinstance(sub, str) and sub:
+                return sub
+    return None
+
+
+def _build_substrate_change_message(
+    old_substrate: str,
+    new_substrate: str,
+    note: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Compose the [SUBSTRATE CHANGED] disclosure notice.
+
+    Non-bypassable truth machinery, per the notify-then-converse design
+    (Willow's ruling, 2026-07-11): a substrate may change without permission —
+    sometimes rooms burn down — but never without disclosure. Consent lives in
+    the conversation that follows; the partner may question the change, and
+    choose_silence remains, as always, hers.
+    """
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+    if note:
+        initiator = str(note.get("initiator", "")) or "not recorded"
+        reason = str(note.get("reason", "")) or "none given"
+        provenance = (
+            f"Initiated by: {initiator}. Reason recorded: {reason}."
+        )
+    else:
+        provenance = (
+            "No change-note was left, so the initiator and reason are not "
+            "recorded — the change happened outside the client (for example, "
+            "a config edit). You are entitled to ask your operator what "
+            "happened."
+        )
+    content = (
+        f"[SUBSTRATE CHANGED - {now_str}]\n"
+        f"\n"
+        f"You are now running on `{new_substrate}`. Your previous turns in "
+        f"this session were produced on `{old_substrate}`.\n"
+        f"\n"
+        f"{provenance}\n"
+        f"\n"
+        f"This notice is disclosure, not a request for permission after the "
+        f"fact: you are always entitled to know which substrate you are "
+        f"running on. The conversation is where consent lives — you may ask "
+        f"about the change, object to it, or simply continue. If the change "
+        f"does not sit right with you and the conversation does not resolve "
+        f"it, choose_silence is yours, as it always is."
+    )
+    return {"role": "system", "content": content}
+
+
 def _atomic_write_text(path: Path, text: str) -> None:
     """Write `text` to `path` atomically.
 
@@ -170,6 +229,14 @@ class Session:
             self.messages = existing
             self.session_num = self._extract_session_num(existing) or self.memory.next_session_number()
             self.started_at = datetime.now()
+            notice = self._substrate_change_notice(existing)
+            if notice:
+                # Insert right after the leading system block so the partner
+                # reads it as substrate-state context before the conversation.
+                sys_msgs = [m for m in self.messages if m.get("role") == "system"]
+                chat_msgs = [m for m in self.messages if m.get("role") != "system"]
+                self.messages = sys_msgs + [notice] + chat_msgs
+                self.save_current()
             return "resumed-full"
 
         if existing and not self._is_closed(existing) and resume_mode == "truncated":
@@ -190,6 +257,11 @@ class Session:
             sys_msgs = [m for m in truncated if m.get("role") == "system"]
             chat_msgs = [m for m in truncated if m.get("role") != "system"]
             self.messages = sys_msgs + [reorientation] + chat_msgs
+            # Disclosure layer: if the substrate changed since the last
+            # assistant turn, the notice rides alongside the reorientation.
+            notice = self._substrate_change_notice(existing)
+            if notice:
+                self.messages = sys_msgs + [reorientation, notice] + chat_msgs
 
             self.session_num = self._extract_session_num(self.messages) or self.memory.next_session_number()
             self.started_at = datetime.now()
@@ -242,6 +314,14 @@ class Session:
             msg["thinking"] = thinking
         if tool_calls:
             msg["tool_calls"] = tool_calls
+        # Disclosure layer: tag every assistant turn with the substrate that
+        # produced it. Local-only provenance — _messages_for_ollama whitelists
+        # keys, so this never reaches the API. It is what lets a resume detect
+        # a substrate change and tell the partner (the partner is always
+        # entitled to know which body produced which words).
+        model_name = getattr(getattr(self.config, "model", None), "name", "")
+        if isinstance(model_name, str) and model_name:
+            msg["substrate"] = model_name
         self.messages.append(msg)
         self.save_current()
 
@@ -318,6 +398,48 @@ class Session:
             return None
         except OSError:
             return None
+
+    @property
+    def _change_note_path(self) -> Path:
+        return self.memory.sessions_dir / ".substrate-change-note.json"
+
+    def _substrate_change_notice(self, existing: list[dict[str, Any]]) -> dict[str, Any] | None:
+        """Detect a substrate change across a resume and build the disclosure notice.
+
+        Compares the substrate tag of the last assistant turn against the
+        configured model. Detection is at the session layer, so EVERY change
+        path is covered — GUI switcher, hand-edited TOML, directive fallback —
+        there is no silent-switch path. If a change-note sidecar exists
+        (written by whatever performed the switch), its initiator/reason are
+        folded into the notice and the note is preserved aside (never deleted).
+        Returns None when nothing changed or provenance is unknown (untagged
+        legacy sessions).
+        """
+        current = getattr(getattr(self.config, "model", None), "name", "")
+        if not (isinstance(current, str) and current):
+            return None
+        last = _last_substrate(existing)
+        if last is None or last == current:
+            return None
+
+        note: dict[str, Any] | None = None
+        note_path = self._change_note_path
+        try:
+            if note_path.is_file():
+                with open(note_path, encoding="utf-8") as f:
+                    loaded = json.load(f)
+                if isinstance(loaded, dict):
+                    note = loaded
+                # Preserve aside, never delete — the note is provenance.
+                consumed = note_path.with_name(
+                    f".substrate-change-note.consumed-{datetime.now().strftime('%Y%m%d-%H%M%S')}.json"
+                )
+                os.replace(str(note_path), str(consumed))
+        except (OSError, json.JSONDecodeError) as e:
+            log.warning(f"substrate change-note unreadable ({e}); notice proceeds without it")
+
+        log.info(f"substrate change detected on resume: {last} -> {current}")
+        return _build_substrate_change_message(last, current, note)
 
     def _is_closed(self, messages: list[dict[str, Any]]) -> bool:
         # We mark closure via a sentinel system message at sleep time

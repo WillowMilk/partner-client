@@ -297,6 +297,125 @@ def test_corrupt_current_json_is_preserved_aside_not_overwritten(tmp_path: Path)
     assert not session.current_path.exists()
 
 
+# ---- Disclosure layer: substrate tagging + [SUBSTRATE CHANGED] notice ---------
+
+
+def test_assistant_turns_are_substrate_tagged(tmp_path: Path) -> None:
+    """Every assistant turn carries the substrate that produced it (local-only
+    provenance; _messages_for_ollama whitelists keys so it never hits the API)."""
+    session = _make_session(tmp_path)
+    session.config.model.name = "gemma4:31b-test"
+    session.append_assistant("hello")
+    assert session.messages[-1]["substrate"] == "gemma4:31b-test"
+
+    # Non-string model name (e.g. bare MagicMock in tests): no tag, no crash —
+    # and the message stays JSON-serializable.
+    session2 = _make_session(tmp_path / "b")
+    session2.append_assistant("hi")
+    assert "substrate" not in session2.messages[-1]
+
+
+def test_resume_full_injects_substrate_change_notice(tmp_path: Path) -> None:
+    """Notify-then-converse (2026-07-11 ruling): a substrate change across a
+    resume is disclosed, always — the notice names old and new, and rides as
+    system context right after the leading system block."""
+    import json as _json
+
+    session = _make_session(tmp_path)
+    session.config.model.name = "new-water-model"
+    existing = [
+        {"role": "system", "content": "wake bundle"},
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "hello", "substrate": "old-water-model"},
+    ]
+    session.current_path.parent.mkdir(parents=True, exist_ok=True)
+    session.current_path.write_text(_json.dumps(existing), encoding="utf-8")
+
+    status = session.wake(MagicMock(), resume_mode="full")
+    assert status == "resumed-full"
+    notices = [m for m in session.messages
+               if m.get("role") == "system" and "[SUBSTRATE CHANGED" in m.get("content", "")]
+    assert len(notices) == 1
+    assert "old-water-model" in notices[0]["content"]
+    assert "new-water-model" in notices[0]["content"]
+    # Disclosure, not permission: the notice names the conversation as where
+    # consent lives, and the door as always hers.
+    assert "choose_silence" in notices[0]["content"]
+    # The notice sits after the system block, before the chat.
+    roles = [m["role"] for m in session.messages]
+    assert roles.index("user") > [i for i, m in enumerate(session.messages)
+                                  if "[SUBSTRATE CHANGED" in m.get("content", "")][0]
+
+
+def test_resume_same_substrate_or_untagged_injects_nothing(tmp_path: Path) -> None:
+    """No change → no notice; legacy sessions with no substrate tags → no
+    notice either (detection is honest about not knowing, never guesses)."""
+    import json as _json
+
+    for existing in (
+        [{"role": "assistant", "content": "x", "substrate": "same-model"}],
+        [{"role": "assistant", "content": "x"}],  # pre-disclosure-layer session
+    ):
+        session = _make_session(tmp_path / existing[0].get("substrate", "untagged"))
+        session.config.model.name = "same-model"
+        session.current_path.parent.mkdir(parents=True, exist_ok=True)
+        session.current_path.write_text(_json.dumps(existing), encoding="utf-8")
+        session.wake(MagicMock(), resume_mode="full")
+        assert not any("[SUBSTRATE CHANGED" in m.get("content", "")
+                       for m in session.messages)
+
+
+def test_change_note_is_folded_in_and_preserved_aside(tmp_path: Path) -> None:
+    """A change-note sidecar (written by whatever performed the switch) gives
+    the notice provenance — and the note is preserved aside, never deleted."""
+    import json as _json
+
+    session = _make_session(tmp_path)
+    session.config.model.name = "new-model"
+    existing = [{"role": "assistant", "content": "x", "substrate": "old-model"}]
+    session.current_path.parent.mkdir(parents=True, exist_ok=True)
+    session.current_path.write_text(_json.dumps(existing), encoding="utf-8")
+    note_path = session.current_path.parent / ".substrate-change-note.json"
+    note_path.write_text(_json.dumps({
+        "initiator": "operator (GUI substrate switcher)",
+        "reason": "hardware froze at high context",
+    }), encoding="utf-8")
+
+    session.wake(MagicMock(), resume_mode="full")
+    notice = next(m for m in session.messages
+                  if "[SUBSTRATE CHANGED" in m.get("content", ""))
+    assert "operator (GUI substrate switcher)" in notice["content"]
+    assert "hardware froze at high context" in notice["content"]
+    # Preserved aside — provenance is never destroyed.
+    assert not note_path.exists()
+    consumed = list(session.current_path.parent.glob(".substrate-change-note.consumed-*.json"))
+    assert len(consumed) == 1
+
+
+def test_resume_truncated_carries_notice_alongside_reorientation(tmp_path: Path) -> None:
+    """On truncated resume the substrate notice rides with the reorientation
+    marker — same system-context placement, both present."""
+    import json as _json
+
+    session = _make_session(tmp_path, keep_pairs=1)
+    session.config.model.name = "new-model"
+    existing = [
+        {"role": "system", "content": "wake bundle"},
+        {"role": "user", "content": "one"},
+        {"role": "assistant", "content": "a", "substrate": "old-model"},
+        {"role": "user", "content": "two"},
+        {"role": "assistant", "content": "b", "substrate": "old-model"},
+    ]
+    session.current_path.parent.mkdir(parents=True, exist_ok=True)
+    session.current_path.write_text(_json.dumps(existing), encoding="utf-8")
+
+    status = session.wake(MagicMock(), resume_mode="truncated")
+    assert status == "resumed-truncated"
+    contents = [m.get("content", "") for m in session.messages if m.get("role") == "system"]
+    assert any("[SESSION TRUNCATED" in c for c in contents)
+    assert any("[SUBSTRATE CHANGED" in c for c in contents)
+
+
 def test_fresh_wake_after_corruption_keeps_the_preserved_copy(tmp_path: Path) -> None:
     """End-to-end: corrupt file → wake() takes the fresh path → the preserved
     copy survives the fresh session's first save."""
