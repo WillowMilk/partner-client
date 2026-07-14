@@ -133,6 +133,32 @@ def test_wake_bundle_names_the_substrate(tmp_path: Path) -> None:
     assert "[SUBSTRATE CHANGED]" in bundle.system_prompt  # she's told how change arrives
 
 
+def test_wake_bundle_acknowledges_standing_directive(tmp_path: Path) -> None:
+    """When her directive is on file, every wake reminds her it stands —
+    her own plan, revisable any time; never a demand."""
+    from partner_client.memory import Memory
+
+    config = load_config(write_minimal_home(tmp_path))
+    memory_dir = config.resolve(config.memory.memory_dir)
+    memory_dir.mkdir(parents=True, exist_ok=True)
+    (memory_dir / "substrate-directive.md").write_text(
+        "## Fallback chain\n1. gemma4:31b\n\n## Cloud\nallow_cloud: never\n",
+        encoding="utf-8",
+    )
+    bundle = Memory(config).assemble_wake_bundle()
+    assert "standing substrate directive is on file" in bundle.system_prompt
+    assert "'never'" in bundle.system_prompt
+    assert "revise it any time" in bundle.system_prompt
+
+    # And without one, the substrate section stands alone — no nagging.
+    second = tmp_path / "second"
+    second.mkdir()
+    config2 = load_config(write_minimal_home(second))
+    bundle2 = Memory(config2).assemble_wake_bundle()
+    assert "[SUBSTRATE]" in bundle2.system_prompt
+    assert "standing substrate directive" not in bundle2.system_prompt
+
+
 def test_doctor_substrate_continuity_warns_on_mismatch(tmp_path: Path) -> None:
     """Doctor gives the operator the same truth pre-flight: config says where
     she WILL wake; session tags say where she HAS BEEN."""

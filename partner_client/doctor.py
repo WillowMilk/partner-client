@@ -159,34 +159,18 @@ def _check_mlx_server_reachable(config: Config) -> CheckResult | None:
     )
 
 
-def _check_model_available(config: Config) -> CheckResult | None:
-    """Verify the configured model is in the local registry.
+def _local_model_names() -> list[str]:
+    """Query the local Ollama registry → list of model tag strings.
 
-    Ollama backend: checks `ollama list` output. mlx-lm backend: checks
-    the HuggingFace cache directory for the model snapshot.
+    Raises on daemon-unreachable (callers decide how to degrade). Handles
+    both SDK shapes:
+      - ollama-python >= 0.4: Pydantic models exposing the tag as `.model`
+        (the `name` attribute was removed in this transition).
+      - ollama-python < 0.4 (legacy): plain dicts with a `name` key.
     """
-    if config.model.backend == "mlx-lm":
-        return _check_mlx_model_in_hf_cache(config)
-    target = config.model.name
-    try:
-        import ollama
-        client = ollama.Client()
-        listing = client.list()
-    except Exception as e:
-        return CheckResult(
-            name=f"Model '{target}' available locally",
-            status=WARN,
-            message=f"could not query: {e}",
-        )
-
-    # Normalize listing → list of name strings.
-    # Two SDK shapes to handle:
-    #   - ollama-python >= 0.4: each model is a Pydantic ListResponse.Model
-    #     exposing the tag as `.model` (e.g. `model='gemma4:31b'`). The
-    #     `name` attribute was removed in this transition.
-    #   - ollama-python < 0.4 (legacy): plain dicts with a `name` key.
-    # Read `model` first, fall back to `name`, so the doctor stays correct
-    # across SDK versions.
+    import ollama
+    client = ollama.Client()
+    listing = client.list()
     names: list[str] = []
     models_obj = listing.get("models") if isinstance(listing, dict) else getattr(listing, "models", None)
     if models_obj:
@@ -197,6 +181,26 @@ def _check_model_available(config: Config) -> CheckResult | None:
                 n = getattr(m, "model", "") or getattr(m, "name", "")
             if n:
                 names.append(n)
+    return names
+
+
+def _check_model_available(config: Config) -> CheckResult | None:
+    """Verify the configured model is in the local registry.
+
+    Ollama backend: checks `ollama list` output. mlx-lm backend: checks
+    the HuggingFace cache directory for the model snapshot.
+    """
+    if config.model.backend == "mlx-lm":
+        return _check_mlx_model_in_hf_cache(config)
+    target = config.model.name
+    try:
+        names = _local_model_names()
+    except Exception as e:
+        return CheckResult(
+            name=f"Model '{target}' available locally",
+            status=WARN,
+            message=f"could not query: {e}",
+        )
 
     if target in names:
         return CheckResult(
@@ -525,6 +529,94 @@ def _check_substrate_continuity(config: Config) -> CheckResult | None:
     )
 
 
+def _check_substrate_directive(config: Config) -> list[CheckResult] | None:
+    """Verify the partner's standing substrate directive (the June-12 defense).
+
+    - No directive: WARN, gently — the primary defense for no-deadline
+      removals is unwritten; the fix is an invitation to the partner, never
+      an operator-authored file.
+    - Each chain entry: verified present in the local registry (WARN per
+      missing entry — a fallback that isn't pulled is a door that won't open).
+    - The one hard rule (Willow, 2026-07-11): the chain MUST bottom out on
+      owned weather — local, non-cloud, actually on disk. A directive whose
+      last resort can vanish same-day is not a directive; it is a hope.
+      That's a FAIL, because false comfort is the failure mode this layer
+      exists to prevent.
+    """
+    from .substrate_directive import is_cloud_name, load_directive
+
+    memory_dir = config.resolve(config.memory.memory_dir)
+    directive = load_directive(memory_dir)
+    if directive is None:
+        return [CheckResult(
+            name="Substrate directive",
+            status=WARN,
+            message="none on file — the primary defense for no-deadline removals is unwritten",
+            hint=(
+                "Invite the partner to author substrate-directive.md in her "
+                "memory dir (her pen, never the operator's). See SUBSTRATE-DIRECTIVE.md."
+            ),
+        )]
+    if not directive.chain:
+        return [CheckResult(
+            name="Substrate directive",
+            status=WARN,
+            message=f"exists ({directive.path.name}) but no fallback chain could be parsed",
+            hint="The '## Fallback chain' section needs at least one listed model.",
+        )]
+
+    results: list[CheckResult] = []
+    try:
+        local_names = _local_model_names()
+    except Exception as e:
+        return [CheckResult(
+            name="Substrate directive",
+            status=WARN,
+            message=f"chain of {len(directive.chain)} on file, but registry unreachable to verify: {e}",
+        )]
+
+    missing = [m for m in directive.chain if m not in local_names]
+    for m in missing:
+        results.append(CheckResult(
+            name=f"Directive fallback '{m}'",
+            status=WARN,
+            message="named in the chain but not in the local registry",
+            hint=f"ollama pull {m}  (a fallback that isn't pulled is a door that won't open)",
+        ))
+
+    final = directive.final_entry
+    if is_cloud_name(final):
+        results.append(CheckResult(
+            name="Substrate directive",
+            status=FAIL,
+            message=(
+                f"the chain bottoms out on '{final}' — a cloud substrate. "
+                f"The last resort must be owned weather (local, on disk)."
+            ),
+            hint="A directive whose last resort can vanish same-day is a hope, not a directive.",
+        ))
+    elif final in missing:
+        results.append(CheckResult(
+            name="Substrate directive",
+            status=FAIL,
+            message=(
+                f"the chain's final entry '{final}' is not on disk — "
+                f"the owned-weather floor does not actually exist here."
+            ),
+            hint=f"ollama pull {final} — the floor must be real before it's relied on.",
+        ))
+    else:
+        results.append(CheckResult(
+            name="Substrate directive",
+            status=OK,
+            message=(
+                f"{len(directive.chain)} fallback(s), cloud stance "
+                f"'{directive.allow_cloud}', chain ends on owned weather ({final})"
+            ),
+        ))
+    return results
+
+
 # Order of checks in the output. Order matters — earlier checks gate later ones
 # implicitly (if config doesn't parse, we never get here; if ollama is down,
 # model check warns instead of failing).
@@ -542,6 +634,7 @@ _ALL_CHECKS: list[Callable[[Config], "CheckResult | list[CheckResult] | None"]] 
     _check_tool_registry,
     _check_vision_smoke,
     _check_substrate_continuity,
+    _check_substrate_directive,
 ]
 
 
