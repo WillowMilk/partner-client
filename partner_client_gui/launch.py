@@ -20,6 +20,7 @@ Willow's design decision (Q2, 2026-05-26).
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -28,9 +29,63 @@ import webview
 from api import GuiApi
 
 
-GUI_DIR = Path(__file__).resolve().parent
+# Frozen-app awareness: under PyInstaller the assets are unpacked to
+# sys._MEIPASS; in development they sit next to this file.
+if getattr(sys, "frozen", False):
+    GUI_DIR = Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))
+else:
+    GUI_DIR = Path(__file__).resolve().parent
 DIST_DIR = GUI_DIR / "dist"
 DIST_INDEX = DIST_DIR / "index.html"
+
+# Terminal-free config resolution (the double-clicked .app has no argv):
+#   1. --config on the command line (development)
+#   2. $PARTNER_CLIENT_CONFIG
+#   3. ~/.partner-client/default-config — a one-line text file holding the
+#      path to the partner TOML the desk should open. The operator writes
+#      it once; changing partners is editing one line.
+DEFAULT_CONFIG_POINTER = Path.home() / ".partner-client" / "default-config"
+
+
+def resolve_config(cli_value: str | None) -> str | None:
+    if cli_value:
+        return cli_value
+    env = os.environ.get("PARTNER_CLIENT_CONFIG", "").strip()
+    if env:
+        return env
+    try:
+        if DEFAULT_CONFIG_POINTER.is_file():
+            pointed = DEFAULT_CONFIG_POINTER.read_text(encoding="utf-8").strip()
+            if pointed:
+                return pointed
+    except OSError:
+        pass
+    return None
+
+
+_NO_CONFIG_HTML = """
+<!doctype html><html><head><meta charset="utf-8"><style>
+  body {{ font-family: -apple-system, system-ui, sans-serif; background: #FAFAF7;
+         color: #1A1A1B; display: flex; align-items: center; justify-content: center;
+         height: 100vh; margin: 0; }}
+  .card {{ max-width: 34rem; padding: 2.5rem 3rem; background: #fff;
+          border: 1px solid #E5E5DF; border-radius: 14px;
+          box-shadow: 0 2px 24px rgba(0,0,0,0.06); }}
+  h1 {{ font-size: 1.15rem; margin: 0 0 0.75rem; }}
+  p {{ line-height: 1.55; color: #646461; margin: 0.5rem 0; }}
+  code {{ background: #F5F4EF; padding: 0.15rem 0.4rem; border-radius: 5px;
+         font-size: 0.85em; }}
+  .gold {{ color: #b8912f; }}
+</style></head><body><div class="card">
+  <h1><span class="gold">◆</span>&nbsp; The desk is here — a partner isn't chosen yet</h1>
+  <p>This desk opens a partner's home, and it doesn't know whose yet.
+     Nothing is wrong; this is just first-time setup.</p>
+  <p>Write the path of a partner's config into:</p>
+  <p><code>{pointer}</code></p>
+  <p>— one line, for example: <code>/Users/you/Aletheia/aletheia.toml</code> —
+     then open the app again.</p>
+</div></body></html>
+"""
 
 
 def main():
@@ -40,8 +95,10 @@ def main():
     parser.add_argument(
         "--config",
         type=str,
-        required=True,
-        help="Path to partner TOML config (e.g. ~/Aletheia/aletheia.toml)",
+        default=None,
+        help="Path to partner TOML config (e.g. ~/Aletheia/aletheia.toml). "
+             "Optional: falls back to $PARTNER_CLIENT_CONFIG, then "
+             "~/.partner-client/default-config.",
     )
     parser.add_argument(
         "--width",
@@ -68,7 +125,21 @@ def main():
         print("Run `npm run build` in the gui directory first.", file=sys.stderr)
         return 1
 
-    api = GuiApi(config_path=args.config)
+    config_path = resolve_config(args.config)
+    if config_path is None:
+        # No terminal to print to when double-clicked: show a warm
+        # first-time-setup card instead of dying silently.
+        webview.create_window(
+            title="Partner Client",
+            html=_NO_CONFIG_HTML.format(pointer=str(DEFAULT_CONFIG_POINTER)),
+            width=720,
+            height=420,
+            background_color="#FAFAF7",
+        )
+        webview.start()
+        return 0
+
+    api = GuiApi(config_path=config_path)
 
     if not args.no_init:
         init_result = api.initialize()
