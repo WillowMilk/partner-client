@@ -154,7 +154,7 @@ def main():
         print("--no-init: backend NOT initialized; shell-only mode")
 
     window = webview.create_window(
-        title="partner-client",
+        title="Partner Client",
         url=str(DIST_INDEX),
         js_api=api,
         width=args.width,

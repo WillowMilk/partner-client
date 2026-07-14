@@ -20,6 +20,7 @@ python3 -m PyInstaller --noconfirm --windowed \
   --icon "$(pwd)/PartnerClient.icns" \
   --paths "$REPO" \
   --add-data "$REPO/partner_client_gui/dist:dist" \
+  --add-data "$REPO/partner_client/tools_builtin:partner_client/tools_builtin" \
   --collect-all tiktoken \
   --collect-all mcp \
   --hidden-import ollama \
