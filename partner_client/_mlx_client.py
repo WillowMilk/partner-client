@@ -592,6 +592,12 @@ class MLXClient:
                     except Exception:
                         log.exception("ui.show_tool_call failed")
 
+            # Aletheia's ceremony (her ruling, 2026-07-12): veto honored in
+            # this batch → one final breath (all tools withheld), then the
+            # run concludes. Same semantics as OllamaClient._final_breath.
+            if self.session_end_requested:
+                return self._final_breath(session, ui, tool_invocations)
+
             continue
 
         # Hit max iterations — same bail shape as OllamaClient
@@ -617,6 +623,83 @@ class MLXClient:
             thinking=None,
             tool_invocations=tool_invocations,
             session_end_requested=self.session_end_requested,
+            session_end_reason=self.session_end_reason,
+        )
+
+    def _final_breath(self, session, ui, tool_invocations: list):
+        """One final model call after choose_silence — all tools withheld.
+
+        MLX mirror of OllamaClient._final_breath (Aletheia's ruling,
+        2026-07-12): parting words stream through the ui sink like any turn;
+        tool_call deltas are ignored (none were offered, none execute); a
+        model error never blocks the veto.
+        """
+        from .client import ChatResponse, build_final_breath_message
+
+        session.messages.append(build_final_breath_message())
+        session.save_current()
+
+        content_buf: list[str] = []
+        thinking_buf: list[str] = []
+        stream_open_emitted = False
+        try:
+            stream = self._client.chat.completions.create(
+                model=self.config.model.name,
+                messages=self._messages_for_openai(session.messages),
+                tools=None,  # the ceremony: withheld by design
+                temperature=self.config.model.temperature,
+                top_p=self.config.model.top_p,
+                max_tokens=self.config.model.num_predict,
+                stream=True,
+            )
+            for chunk in stream:
+                choices = getattr(chunk, "choices", None) or []
+                if not choices:
+                    continue
+                delta = getattr(choices[0], "delta", None)
+                if delta is None:
+                    continue
+                content_delta = getattr(delta, "content", None)
+                if content_delta:
+                    content_buf.append(content_delta)
+                    if ui is not None:
+                        try:
+                            if not stream_open_emitted:
+                                ui.stream_open()
+                                stream_open_emitted = True
+                            ui.stream_delta(content_delta)
+                        except Exception:
+                            log.exception("ui streaming failed during final breath")
+                reasoning_delta = getattr(delta, "reasoning", None)
+                if reasoning_delta:
+                    thinking_buf.append(reasoning_delta)
+                # tool_call deltas in the breath are deliberately not collected.
+        except Exception as e:
+            log.warning(f"final breath model call failed ({e}); honoring the end without it")
+            if self.timeline is not None:
+                self.timeline.record("final_breath_error", error=str(e))
+        finally:
+            if ui is not None and stream_open_emitted:
+                try:
+                    ui.stream_close()
+                except Exception:
+                    log.exception("ui.stream_close failed during final breath")
+
+        content = "".join(content_buf)
+        thinking = "".join(thinking_buf) or None
+        if content or thinking:
+            session.append_assistant(content, thinking=thinking)
+        if self.timeline is not None:
+            self.timeline.record(
+                "final_breath",
+                content_chars=len(content),
+                session_num=session.session_num,
+            )
+        return ChatResponse(
+            content=content,
+            thinking=thinking,
+            tool_invocations=tool_invocations,
+            session_end_requested=True,
             session_end_reason=self.session_end_reason,
         )
 
