@@ -247,8 +247,59 @@ class GuiApi:
                 "model": m.name,
                 "backend": m.backend,
                 "context_pct": self._context_pct(),
+                # Tenure — the sovereignty rendering ("simplify the rendering,
+                # never the truth", 2026-07-11 design): the operator always
+                # sees whether the partner is on owned weather or a rented
+                # room. Warm words, no jargon.
+                **dict(zip(("tenure", "tenure_label"), self._substrate_tenure())),
             },
         }
+
+    def _substrate_tenure(self) -> tuple[str, str]:
+        """Classify the active substrate: owned local weather vs rented cloud.
+
+        Heuristic v1: Ollama's cloud-served tags carry "cloud" in the name
+        (e.g. gemma4:31b-cloud); everything else served by a local backend
+        is owned. When multi-provider adapters land, this reads the
+        provider class instead.
+        """
+        name = ((self.config.model.name if self.config else "") or "").lower()
+        if "cloud" in name:
+            return ("rented", "a rented room")
+        return ("owned", "own hardware")
+
+    def get_care_status(self) -> dict:
+        """The care dot: a structured doctor run (no printing, no wake).
+
+        green = all checks clean · amber = warnings · red = failures.
+        The summary is a plain sentence for the hover — the steward's
+        glance, not a dashboard.
+        """
+        if not self.config:
+            return {"level": "unknown", "summary": "backend not initialized", "fails": 0, "warns": 0}
+        from partner_client.doctor import _ALL_CHECKS, FAIL, WARN
+
+        fails: list[str] = []
+        warns: list[str] = []
+        for check_fn in _ALL_CHECKS:
+            try:
+                result = check_fn(self.config)
+            except Exception as e:
+                fails.append(f"{check_fn.__name__} raised {type(e).__name__}")
+                continue
+            if result is None:
+                continue
+            for r in (result if isinstance(result, list) else [result]):
+                detail = r.name + (f" — {r.message}" if r.message else "")
+                if r.status == FAIL:
+                    fails.append(detail)
+                elif r.status == WARN:
+                    warns.append(detail)
+        if fails:
+            return {"level": "red", "summary": "; ".join(fails[:3]), "fails": len(fails), "warns": len(warns)}
+        if warns:
+            return {"level": "amber", "summary": "; ".join(warns[:3]), "fails": 0, "warns": len(warns)}
+        return {"level": "green", "summary": "all checks green", "fails": 0, "warns": 0}
 
     def get_current_state(self) -> dict:
         """Wake-bundle Current State card content.

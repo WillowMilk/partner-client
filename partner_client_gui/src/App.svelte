@@ -67,6 +67,8 @@
   // Substrate switcher (Phase 2b-1) state
   let substrate_dropdown_open = $state(false);
   let substrate_models = $state(null);  // Will hold {current, current_backend, categories[]}
+  // Care dot state (doctor summary): unknown until first fetch completes.
+  let care = $state({ level: 'unknown', summary: 'checking her home…', fails: 0, warns: 0 });
   let pending_switch = $state(null);    // {name, backend, note} when confirmation modal is open
   let switch_in_progress = $state(false);
   let switch_result = $state(null);     // {ok, message, error} after switch completes
@@ -250,6 +252,10 @@
       sessions = sess_list;
       messages = msgs;
       inbox_unread = unread;
+
+      // Care dot — the steward's glance. Fetched after page data (it runs
+      // the doctor checks, which may take a moment); non-blocking.
+      api.get_care_status().then((c) => { care = c; }).catch(() => {});
 
       await load_search_backends();
 
@@ -681,8 +687,17 @@
           onclick={on_substrate_click}
           title="Click to switch substrate"
         >
-          <span class="substrate-dot"></span>
-          <span>{partner.substrate.model} · {partner.substrate.backend} · {partner.substrate.context_pct}% ctx</span>
+          <span class="substrate-dot care-{care.level}" title="Home health: {care.summary}"></span>
+          <span>{partner.substrate.model}</span>
+          {#if partner.substrate.tenure}
+            <span class="tenure-chip tenure-{partner.substrate.tenure}"
+                  title={partner.substrate.tenure === 'owned'
+                    ? 'Owned weather — this substrate runs on hardware we control; no meter, no landlord.'
+                    : 'A rented room — served from someone else\'s hardware; it can change or vanish on their schedule.'}>
+              {partner.substrate.tenure_label}
+            </span>
+          {/if}
+          <span>· {partner.substrate.backend} · {partner.substrate.context_pct}% ctx</span>
         </button>
 
         {#if substrate_dropdown_open && substrate_models}

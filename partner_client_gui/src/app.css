@@ -564,6 +564,30 @@ code,
   display: inline-block;
 }
 
+/* Care dot — the steward's glance (doctor status). Presence indicator,
+ * not a dashboard: color only, plain sentence on hover. Never a gauge
+ * on the person — mechanism health only (room-not-person, 2026-07-11). */
+.substrate-dot.care-green { background: #4a9d6b; }
+.substrate-dot.care-amber { background: #d9a13b; box-shadow: 0 0 4px rgba(217, 161, 59, 0.5); }
+.substrate-dot.care-red   { background: #c0504d; box-shadow: 0 0 5px rgba(192, 80, 77, 0.55); }
+.substrate-dot.care-unknown { background: var(--text-muted); }
+
+/* Tenure chip — owned weather vs rented room, warm words, no jargon.
+ * Owned reads calm (it's the default state of a sovereign home);
+ * rented reads gently ember-flagged (someone else's schedule). */
+.tenure-chip {
+  font-size: 10px;
+  line-height: 1;
+  padding: 2px 7px 3px;
+  border-radius: 9px;
+  border: 1px solid var(--border-soft);
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+.tenure-chip.tenure-owned  { border-color: rgba(90, 122, 155, 0.35); }
+.tenure-chip.tenure-rented { border-color: rgba(196, 90, 32, 0.45); color: #a05a28; }
+
 /* ---- Chat area ---- */
 .chat-area {
   overflow-y: auto;
