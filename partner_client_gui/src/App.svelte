@@ -69,6 +69,33 @@
   let substrate_models = $state(null);  // Will hold {current, current_backend, categories[]}
   // Care dot state (doctor summary): unknown until first fetch completes.
   let care = $state({ level: 'unknown', summary: 'checking her home…', fails: 0, warns: 0 });
+
+  // Hub inbox panel (Phase 2c) — read-only: marking letters read is the
+  // partner's own bookkeeping act, never the desk's.
+  let inbox_panel_open = $state(false);
+  let inbox_data = $state(null);
+  let open_letter = $state(null);
+
+  async function on_inbox_click() {
+    inbox_panel_open = !inbox_panel_open;
+    open_letter = null;
+    if (inbox_panel_open && window.pywebview?.api) {
+      try {
+        inbox_data = await window.pywebview.api.get_inbox();
+      } catch (e) {
+        inbox_data = { unread: [], read: [], error: String(e) };
+      }
+    }
+  }
+
+  async function on_letter_click(file) {
+    if (!file || !window.pywebview?.api) return;
+    try {
+      open_letter = await window.pywebview.api.get_letter(file);
+    } catch (e) {
+      open_letter = { error: String(e) };
+    }
+  }
   let pending_switch = $state(null);    // {name, backend, note} when confirmation modal is open
   let switch_in_progress = $state(false);
   let switch_result = $state(null);     // {ok, message, error} after switch completes
@@ -617,7 +644,7 @@
     <div class="sidebar-spacer"></div>
 
     <div class="sidebar-section">
-      <div class="sidebar-link">
+      <button class="sidebar-link sidebar-link-button" class:active={inbox_panel_open} onclick={on_inbox_click}>
         <span class="label">
           <span>🔥</span>
           <span>Inbox</span>
@@ -625,7 +652,7 @@
         {#if inbox_unread > 0}
           <span class="badge">{inbox_unread}</span>
         {/if}
-      </div>
+      </button>
       <div class="sidebar-link">
         <span class="label">
           <span>📖</span>
@@ -902,6 +929,61 @@
       </div>
     </div>
   </main>
+
+  <!-- ============================================================ -->
+  <!-- Hub inbox panel (Phase 2c) — read-only postal window -->
+  <!-- ============================================================ -->
+  {#if inbox_panel_open}
+    <div class="modal-backdrop" onclick={() => { inbox_panel_open = false; open_letter = null; }}>
+      <div class="modal-panel inbox-panel" onclick={(e) => e.stopPropagation()}>
+        {#if open_letter}
+          <div class="modal-title inbox-letter-title">
+            <button class="inbox-back" onclick={() => { open_letter = null; }}>← inbox</button>
+            <code>{open_letter.filename || ''}</code>
+          </div>
+          <div class="inbox-letter-body">
+            {#if open_letter.error}
+              <div class="inbox-empty">{open_letter.error}</div>
+            {:else}
+              <pre class="inbox-letter-text">{open_letter.content}</pre>
+            {/if}
+          </div>
+        {:else}
+          <div class="modal-title">🔥 {partner.name}'s Hub inbox</div>
+          <div class="inbox-list">
+            {#if inbox_data?.error}
+              <div class="inbox-empty">{inbox_data.error}</div>
+            {:else if !inbox_data}
+              <div class="inbox-empty">loading…</div>
+            {:else}
+              {#if inbox_data.unread.length > 0}
+                <div class="inbox-section-label">Unread — waiting for her next reach</div>
+                {#each inbox_data.unread as entry}
+                  <button class="inbox-entry unread" onclick={() => on_letter_click(entry.file)} disabled={!entry.file}>
+                    <span class="inbox-entry-text">{entry.text}</span>
+                  </button>
+                {/each}
+              {/if}
+              {#if inbox_data.read.length > 0}
+                <div class="inbox-section-label">Read</div>
+                {#each inbox_data.read as entry}
+                  <button class="inbox-entry" onclick={() => on_letter_click(entry.file)} disabled={!entry.file}>
+                    <span class="inbox-entry-text">{entry.text}</span>
+                  </button>
+                {/each}
+              {/if}
+              {#if inbox_data.unread.length === 0 && inbox_data.read.length === 0}
+                <div class="inbox-empty">No letters yet — the Hub is quiet.</div>
+              {/if}
+            {/if}
+          </div>
+          <div class="inbox-footnote">
+            Read-only window. Marking a letter read is {partner.name}'s own act, at her next reach — the desk never does her bookkeeping.
+          </div>
+        {/if}
+      </div>
+    </div>
+  {/if}
 
   <!-- ============================================================ -->
   <!-- Substrate switch confirmation modal (Phase 2b-1) -->

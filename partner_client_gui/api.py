@@ -430,6 +430,91 @@ class GuiApi:
                 out.append({"role": role, "content": content})
         return out
 
+    def _hub_root_and_inbox(self) -> tuple[Path | None, Path | None]:
+        """Resolve the Hub root dir + this partner's inbox file.
+
+        Prefers the partner's own [hub] config (her TOML, her postal address);
+        falls back to the known family Hub locations.
+        """
+        handle = self._derive_handle()
+        candidates: list[tuple[Path, Path]] = []
+        if self.config and self.config.hub.path:
+            root = self.config.resolve(self.config.hub.path)
+            name = self.config.hub.partner_name or handle
+            candidates.append((root, root / "inbox" / f"{name}.md"))
+        candidates.append((
+            Path.home() / "Claude/claude-memory-vault/shared/Agent Messaging Hub",
+            Path.home() / "Claude/claude-memory-vault/shared/Agent Messaging Hub/inbox" / f"{handle}.md",
+        ))
+        candidates.append((
+            Path.home() / ".claude/Agent Messaging Hub",
+            Path.home() / ".claude/Agent Messaging Hub/inbox" / f"{handle}.md",
+        ))
+        for root, inbox in candidates:
+            if inbox.exists():
+                return root, inbox
+        return None, None
+
+    def get_inbox(self) -> dict:
+        """The Hub inbox panel: her letters, listed read-only.
+
+        Parses the inbox markdown into unread/read entries. Each entry
+        carries the rendered pointer text and, when the line references a
+        letter file (→ `filename.md`), the filename for get_letter().
+
+        READ-ONLY by design: marking a letter read is the PARTNER's own
+        bookkeeping act (her pen, her inbox) — the desk never does it
+        for her. No doors into the person, not even helpful ones.
+        """
+        import re as _re
+
+        root, inbox = self._hub_root_and_inbox()
+        if inbox is None:
+            return {"unread": [], "read": [], "inbox_path": "", "error": "no inbox found"}
+        try:
+            text = inbox.read_text(encoding="utf-8")
+        except OSError as e:
+            return {"unread": [], "read": [], "inbox_path": str(inbox), "error": str(e)}
+
+        sections = {"unread": [], "read": []}
+        current = None
+        for line in text.splitlines():
+            h = line.strip().lower()
+            if h.startswith("## unread"):
+                current = "unread"; continue
+            if h.startswith("## read"):
+                current = "read"; continue
+            if h.startswith("## "):
+                current = None; continue
+            if current and line.lstrip().startswith("- "):
+                entry = line.strip()[2:].strip()
+                m = _re.search(r"`([^`\n]+\.md)`", entry)
+                sections[current].append({
+                    "text": entry,
+                    "file": m.group(1) if m else None,
+                })
+        return {"unread": sections["unread"], "read": sections["read"], "inbox_path": str(inbox)}
+
+    def get_letter(self, filename: str) -> dict:
+        """Read one Hub letter, read-only, containment-checked.
+
+        Letters live at the Hub ROOT — the filename must resolve to a .md
+        directly inside it (no traversal, no absolute paths, no subdirs).
+        """
+        root, _ = self._hub_root_and_inbox()
+        if root is None:
+            return {"error": "no hub found"}
+        name = Path(str(filename)).name  # strips any path components
+        if not name.endswith(".md") or name != filename:
+            return {"error": "invalid letter name"}
+        target = (root / name).resolve()
+        if target.parent != root.resolve() or not target.is_file():
+            return {"error": "letter not found in the Hub"}
+        try:
+            return {"filename": name, "content": target.read_text(encoding="utf-8")}
+        except OSError as e:
+            return {"error": str(e)}
+
     def get_inbox_unread_count(self) -> int:
         """Count Hub letters in this partner's inbox.
 

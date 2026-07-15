@@ -1579,3 +1579,103 @@ code,
   .dimming-card { animation: none; }
   .dimming-mark { animation: none; opacity: 0.6; }
 }
+
+/* ---- Hub inbox panel (Phase 2c) — the postal window ---- */
+button.sidebar-link-button {
+  width: 100%;
+  border: none;
+  background: none;
+  font: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+button.sidebar-link-button.active { background: var(--bg-hover); border-radius: 8px; }
+
+.inbox-panel {
+  width: min(720px, 92vw);
+  max-height: 78vh;
+  display: flex;
+  flex-direction: column;
+}
+.inbox-list {
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 4px 0 8px;
+}
+.inbox-section-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  margin: 10px 2px 4px;
+}
+.inbox-entry {
+  border: 1px solid var(--border-soft);
+  background: var(--bg-surface);
+  border-radius: 10px;
+  padding: 9px 12px;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+  color: var(--text-secondary);
+  line-height: 1.45;
+}
+.inbox-entry:hover:not(:disabled) { background: var(--bg-hover); }
+.inbox-entry:disabled { cursor: default; opacity: 0.85; }
+.inbox-entry.unread {
+  border-left: 3px solid var(--accent-partner);
+  color: var(--text-primary);
+}
+.inbox-entry-text {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  font-size: 12.5px;
+}
+.inbox-footnote {
+  font-size: 11px;
+  color: var(--text-muted);
+  border-top: 1px solid var(--border-hairline);
+  padding-top: 8px;
+  margin-top: 6px;
+  font-style: italic;
+}
+.inbox-letter-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.inbox-back {
+  border: 1px solid var(--border-soft);
+  background: var(--bg-surface);
+  border-radius: 8px;
+  padding: 3px 10px;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.inbox-back:hover { background: var(--bg-hover); }
+.inbox-letter-body { overflow-y: auto; }
+.inbox-letter-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: var(--sans, inherit);
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text-primary);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+  padding: 16px 18px;
+  margin: 4px 0 0;
+}
+.inbox-empty {
+  color: var(--text-muted);
+  font-size: 13px;
+  padding: 14px 4px;
+  font-style: italic;
+}
