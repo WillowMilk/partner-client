@@ -736,14 +736,14 @@ class MLXClient:
                     entry["name"] = m["name"]
             out.append(entry)
         # Plan-mode addendum injection (parallel to OllamaClient).
-        from .client import inject_plan_mode_addendum
+        from .client import adapt_midstream_system_for_wire, inject_plan_mode_addendum
         out = inject_plan_mode_addendum(
             out,
             self.plan_mode_active,
             self.plan_approved_this_turn,
             self.config.plan_mode.research_only_tools,
         )
-        return out
+        return adapt_midstream_system_for_wire(out)
 
     @staticmethod
     def _normalize_tool_call_for_openai(tc: dict) -> dict:

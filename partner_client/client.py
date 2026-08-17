@@ -290,6 +290,40 @@ def build_plan_mode_addendum(approved_this_turn: bool, research_only_tools: list
     )
 
 
+def adapt_midstream_system_for_wire(messages: list[dict]) -> list[dict]:
+    """Wire-level adaptation for template-strict substrates (2026-08-17).
+
+    Qwen3.8's chat template raises on any system message after conversation
+    start ("System message must be at the beginning"); gemma's tolerated
+    them. Our architecture injects system messages mid-stream BY DESIGN —
+    checkpoint markers, substrate-change notices, reorientation notes —
+    and the session RECORD must keep their true roles (provenance is
+    load-bearing). So the record stays untouched and the WIRE adapts:
+    any system message after the first non-system message is sent as a
+    clearly-enveloped user-role notice. The adapter contract in practice:
+    every backend must carry the architecture's invariants; the substrate's
+    template quirks are absorbed here, never by changing her record.
+    """
+    out: list[dict] = []
+    seen_non_system = False
+    for m in messages:
+        role = m.get("role")
+        if role != "system":
+            seen_non_system = True
+            out.append(m)
+        elif not seen_non_system:
+            out.append(m)
+        else:
+            adapted = dict(m)
+            adapted["role"] = "user"
+            adapted["content"] = (
+                "[house notice — mechanical, from the client, not a message from Willow]\n"
+                + str(m.get("content", ""))
+            )
+            out.append(adapted)
+    return out
+
+
 def inject_plan_mode_addendum(
     messages: list[dict],
     plan_mode_active: bool,
@@ -1335,7 +1369,7 @@ class OllamaClient:
             self.plan_approved_this_turn,
             self.config.plan_mode.research_only_tools,
         )
-        return out
+        return adapt_midstream_system_for_wire(out)
 
     @staticmethod
     def _normalize_tool_calls_for_ollama(tool_calls: list[dict]) -> list[dict]:
