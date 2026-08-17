@@ -368,9 +368,23 @@ class GuiApi:
             )[:10]
         except Exception:
             archives = []
+        labels = self._load_labels()
         for p in archives:
-            m = re.match(r"(\d{4}-\d{2}-\d{2})_session-(\d+)$", p.stem)
-            title = f"Session {int(m.group(2))}" if m else p.stem.replace("_", " ").replace("session-", "Session ")
+            # Operator label first; else the TRUE session number from inside
+            # the file (the per-day filename counter is not the session
+            # number); else a filename fallback.
+            title = labels.get(p.stem, "")
+            if not title:
+                try:
+                    raw = json.loads(p.read_text(encoding="utf-8"))
+                    num = self._session_num_from_messages(raw)
+                except (OSError, json.JSONDecodeError):
+                    num = None
+                if num is not None:
+                    title = f"Session {num}"
+                else:
+                    m = re.match(r"(\d{4}-\d{2}-\d{2})_session-(\d+)$", p.stem)
+                    title = f"Conversation {int(m.group(2))}" if m else p.stem
             entries.append({
                 "id": p.stem,
                 "title": title,
@@ -420,9 +434,14 @@ class GuiApi:
         """
         if not self.session:
             return []
+        return self._render_messages(self.session.messages)
+
+    def _render_messages(self, raw: list[dict]) -> list[dict]:
+        """Transform raw session messages into the chat-view shape:
+        seam dividers for session markers, carried flags for texture."""
         cfg_model = self.config.model.name if self.config else ""
         out: list[dict] = []
-        for m in self.session.messages:
+        for m in raw:
             role = m.get("role")
             if role == "system":
                 sc = m.get("content", "")
@@ -453,6 +472,90 @@ class GuiApi:
                 carried = bool(m.get("carried")) or bool(tag and cfg_model and tag != cfg_model)
                 out.append({"role": role, "content": content, "carried": carried})
         return out
+
+    # -- Archived-session reader + operator labels (2026-08-17) ---------
+    # The GUI serves the operator's blind spots: her memory is lossy;
+    # transcripts and her own labels are her instruments. Read-only —
+    # the past is record; the present is the only live room.
+
+    _SESSION_STEM_RE = re.compile(r"\d{4}-\d{2}-\d{2}_session-\d+")
+
+    def _labels_path(self) -> Path | None:
+        if not self.memory:
+            return None
+        return Path(self.memory.sessions_dir) / ".session-labels.json"
+
+    def _load_labels(self) -> dict:
+        lp = self._labels_path()
+        if not lp or not lp.is_file():
+            return {}
+        try:
+            data = json.loads(lp.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+        except (OSError, json.JSONDecodeError):
+            return {}
+
+    def get_archived_session(self, stem: str) -> dict:
+        """Load one archived session for read-only viewing."""
+        if not self.memory:
+            return {"ok": False, "error": "Backend not initialized."}
+        if not isinstance(stem, str) or not self._SESSION_STEM_RE.fullmatch(stem):
+            return {"ok": False, "error": "Not a session id."}
+        p = Path(self.memory.sessions_dir) / f"{stem}.json"
+        if not p.is_file():
+            return {"ok": False, "error": "Session not found."}
+        try:
+            raw = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as e:
+            return {"ok": False, "error": f"Unreadable archive: {e}"}
+        label = self._load_labels().get(stem, "")
+        num = self._session_num_from_messages(raw)
+        title = label or (f"Session {num}" if num else stem)
+        return {
+            "ok": True,
+            "stem": stem,
+            "title": title,
+            "messages": self._render_messages(raw if isinstance(raw, list) else []),
+        }
+
+    def set_session_label(self, stem: str, label: str) -> dict:
+        """Operator names a conversation ('Surgery of Session 20'). Her
+        instrument, her file — labels live in a sidecar, never in the
+        session record itself."""
+        if not self.memory:
+            return {"ok": False, "error": "Backend not initialized."}
+        if not isinstance(stem, str) or not self._SESSION_STEM_RE.fullmatch(stem):
+            return {"ok": False, "error": "Not a session id."}
+        label = (label or "").strip()[:80]
+        labels = self._load_labels()
+        if label:
+            labels[stem] = label
+        else:
+            labels.pop(stem, None)
+        lp = self._labels_path()
+        try:
+            tmp = lp.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(labels, indent=2, ensure_ascii=False), encoding="utf-8")
+            tmp.replace(lp)
+        except OSError as e:
+            return {"ok": False, "error": f"Could not save label: {e}"}
+        return {"ok": True, "stem": stem, "label": label}
+
+    @staticmethod
+    def _session_num_from_messages(raw) -> int | None:
+        """True session number from the [SESSION NUM:N] marker (first few
+        system messages) — the per-day archive file counter is NOT the
+        session number and confused the operator (2026-08-17)."""
+        if not isinstance(raw, list):
+            return None
+        for m in raw[:6]:
+            c = m.get("content") if isinstance(m, dict) else None
+            if isinstance(c, str) and c.startswith("[SESSION NUM:"):
+                try:
+                    return int(c.removeprefix("[SESSION NUM:").rstrip("]"))
+                except ValueError:
+                    return None
+        return None
 
     def _hub_root_and_inbox(self) -> tuple[Path | None, Path | None]:
         """Resolve the Hub root dir + this partner's inbox file.
@@ -1134,14 +1237,18 @@ class GuiApi:
         except Exception as e:
             return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
-    def mosaic_sleep(self) -> dict:
+    def mosaic_sleep(self, label: str = "") -> dict:
         """End the current session cleanly (archives current.json, marks
         closed). Then reinitialize session + client for a fresh next turn.
+        Optional `label`: the operator's name for the closing conversation
+        ("The day she chose the new water") — stored in the labels sidecar.
         Returns {ok, archive_path}."""
         if not self.session or not self.config:
             return {"ok": False, "error": "Backend not initialized."}
         try:
             archive_path = self.session.sleep(summary="")
+            if label and label.strip():
+                self.set_session_label(archive_path.stem, label)
             # Reinitialize so the GUI is immediately ready for a fresh turn
             from partner_client.config import load_config
             from partner_client.tools import ToolRegistry

@@ -32,17 +32,20 @@ def test_sidebar_sees_real_archive_filenames(tmp_path):
     api = _bare_api_with_sessions_dir(tmp_path)
     sd = Path(api.memory.sessions_dir)
 
-    # A live session + archives in the REAL archiver's naming shape
+    # A live session + archives in the REAL archiver's naming shape.
+    # One carries the true-session-number marker; one is bare (fallback path).
     (sd / "current.json").write_text("[]", encoding="utf-8")
-    (sd / "2026-08-16_session-011.json").write_text("[]", encoding="utf-8")
+    (sd / "2026-08-16_session-011.json").write_text(json.dumps([
+        {"role": "system", "content": "[SESSION NUM:29]"},
+    ]), encoding="utf-8")
     (sd / "2026-08-09_session-003.json").write_text("[]", encoding="utf-8")
 
     sessions = api.get_sessions()
     titles = [s["title"] for s in sessions]
 
     assert sessions[0]["active"] is True, "current session leads the list"
-    assert "Session 11" in titles, f"dated archive invisible to sidebar: {titles}"
-    assert "Session 3" in titles
+    assert "Session 29" in titles, f"dated archive invisible to sidebar: {titles}"
+    assert "Conversation 3" in titles, "fallback title for marker-less archives"
     assert len(sessions) == 3
 
 
@@ -80,3 +83,69 @@ def test_change_note_sidecars_never_listed(tmp_path):
     sessions = api.get_sessions()
     assert len(sessions) == 1
     assert sessions[0]["id"] == "current"
+
+
+def test_reader_and_labels(tmp_path):
+    """The archive reader serves real archives read-only; labels are the
+    operator's sidecar instrument; traversal-shaped ids are refused."""
+    api = _bare_api_with_sessions_dir(tmp_path)
+    sd = Path(api.memory.sessions_dir)
+    (sd / "2026-08-16_session-011.json").write_text(json.dumps([
+        {"role": "system", "content": "bundle"},
+        {"role": "system", "content": "[SESSION NUM:29]"},
+        {"role": "user", "content": "hello there"},
+        {"role": "assistant", "content": "warmly received"},
+    ]), encoding="utf-8")
+
+    r = api.get_archived_session("2026-08-16_session-011")
+    assert r["ok"] and r["title"] == "Session 29"
+    roles = [m["role"] for m in r["messages"]]
+    assert "user" in roles and "assistant" in roles
+
+    # true session number surfaces in the sidebar too
+    (sd / "current.json").write_text("[]", encoding="utf-8")
+    titles = [s["title"] for s in api.get_sessions()]
+    assert "Session 29" in titles
+
+    # operator label overrides, and clears
+    assert api.set_session_label("2026-08-16_session-011", "The day she chose the new water")["ok"]
+    titles = [s["title"] for s in api.get_sessions()]
+    assert "The day she chose the new water" in titles
+    api.set_session_label("2026-08-16_session-011", "")
+    assert "Session 29" in [s["title"] for s in api.get_sessions()]
+
+    # refusals: traversal shapes and unknown ids
+    assert not api.get_archived_session("../../etc/passwd")["ok"]
+    assert not api.get_archived_session("current")["ok"]
+    assert not api.set_session_label("../evil", "x")["ok"]
+
+
+def test_tail_never_compounds(tmp_path):
+    """A tail of a tail never forms: carried messages are excluded from the
+    next carry; a session with no lived exchanges carries nothing."""
+    from types import SimpleNamespace as NS
+    from partner_client.memory import Memory
+
+    mem = Memory.__new__(Memory)
+    sd = tmp_path / "sessions"
+    sd.mkdir()
+    mem.sessions_dir = sd
+
+    # Prior session: 1 carried pair (old echo) + 1 lived pair
+    (sd / "2026-08-17_session-001.json").write_text(json.dumps([
+        {"role": "system", "content": "[SESSION NUM:30]"},
+        {"role": "user", "content": "echo-u", "carried": True},
+        {"role": "assistant", "content": "echo-a", "carried": True},
+        {"role": "user", "content": "lived-u"},
+        {"role": "assistant", "content": "lived-a"},
+    ]), encoding="utf-8")
+    tail = mem.load_recent_message_pairs(5)
+    assert [m["content"] for m in tail] == ["lived-u", "lived-a"]
+
+    # Prior session with ONLY carried messages: carries nothing at all
+    (sd / "2026-08-17_session-002.json").write_text(json.dumps([
+        {"role": "system", "content": "[SESSION NUM:31]"},
+        {"role": "user", "content": "echo-u", "carried": True},
+        {"role": "assistant", "content": "echo-a", "carried": True},
+    ]), encoding="utf-8")
+    assert mem.load_recent_message_pairs(5) == []

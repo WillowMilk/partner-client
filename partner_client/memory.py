@@ -185,10 +185,17 @@ class Memory:
                 messages = json.load(f)
         except (OSError, json.JSONDecodeError):
             return []
-        # Drop system messages; keep user/assistant pairs from the tail
-        non_system = [m for m in messages if m.get("role") != "system"]
+        # Drop system messages AND previously-carried messages: the tail
+        # carries only exchanges actually LIVED in the closing session —
+        # never a tail of a tail (echo compounding through empty sessions,
+        # found by Willow 2026-08-17). A session with no lived exchanges
+        # carries nothing; the fresh room opens truly blank.
+        lived = [
+            m for m in messages
+            if m.get("role") != "system" and not m.get("carried")
+        ]
         # n pairs = 2n messages
-        return non_system[-(2 * n):]
+        return lived[-(2 * n):]
 
     def _latest_archived_session(self) -> Path | None:
         """Most recent dated session JSON (excluding current.json)."""

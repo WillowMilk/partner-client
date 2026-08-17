@@ -426,6 +426,63 @@
     mosaic_pending = { kind: 'sleep' };
   }
 
+  // -- Carried-tail collapse + archive reader + operator labels (2026-08-17) --
+  let sleep_label = $state('');          // optional name for the closing conversation
+  let tail_expanded = $state(false);     // operator's view only; always in her context
+  let viewing_archive = $state(null);    // {stem, title, messages} — read-only
+  let editing_stem = $state(null);       // sidebar label being edited
+  let editing_label = $state('');
+
+  // Group carried-tail messages behind a collapsed line. Carried messages
+  // outside a tail block (e.g. pre-crossing turns mid-session) stay inline,
+  // just dimmed.
+  const render_items = $derived.by(() => {
+    const src = viewing_archive ? viewing_archive.messages : messages;
+    const out = [];
+    let block = null;
+    for (const m of src) {
+      if (m.role === 'divider' && (m.content || '').startsWith('carried')) {
+        block = { role: 'carried-block', items: [] };
+        out.push(block);
+      } else if (m.carried && block) {
+        block.items.push(m);
+      } else {
+        if (!m.carried) block = null;
+        out.push(m);
+      }
+    }
+    return out;
+  });
+
+  async function open_archive(stem) {
+    try {
+      const r = await window.pywebview.api.get_archived_session(stem);
+      if (r.ok) { viewing_archive = r; tail_expanded = false; }
+      else switch_result = { ok: false, error: r.error };
+    } catch (e) {
+      switch_result = { ok: false, error: `${e.message || e}` };
+    }
+  }
+  function close_archive() { viewing_archive = null; tail_expanded = false; }
+
+  function start_label_edit(sess, ev) {
+    ev.stopPropagation();
+    editing_stem = sess.id;
+    editing_label = sess.title;
+  }
+  async function save_label() {
+    const stem = editing_stem, label = editing_label;
+    editing_stem = null;
+    if (!stem) return;
+    try {
+      const r = await window.pywebview.api.set_session_label(stem, label);
+      if (r.ok) sessions = await window.pywebview.api.get_sessions();
+      else switch_result = { ok: false, error: r.error };
+    } catch (e) {
+      switch_result = { ok: false, error: `${e.message || e}` };
+    }
+  }
+
   function on_mosaic_cancel() {
     mosaic_pending = null;
   }
@@ -441,7 +498,8 @@
       if (kind === 'protect') {
         result = await window.pywebview.api.mosaic_protect();
       } else if (kind === 'sleep') {
-        result = await window.pywebview.api.mosaic_sleep();
+        result = await window.pywebview.api.mosaic_sleep(sleep_label);
+        sleep_label = '';
       }
       switch_result = result.ok
         ? { ok: true, message: result.message }
@@ -459,6 +517,8 @@
           wake_bundle = c_state;
           sessions = sess_list;
           messages = msgs;
+          viewing_archive = null;
+          tail_expanded = false;
         } catch (_) { /* non-fatal */ }
       }
     } catch (e) {
@@ -624,17 +684,34 @@
         <div
           class="session-item"
           class:active={session.active}
+          class:reading={viewing_archive && viewing_archive.stem === session.id}
           class:arc-start={session.arc_position === 'start'}
           class:arc-middle={session.arc_position === 'middle'}
           class:arc-end={session.arc_position === 'end'}
           class:arc-solo={session.arc_position === 'solo'}
-          title={session.arc_position === 'solo' ? 'Solo session' : `Part of an arc (${session.arc_position})`}
+          title={session.active ? 'The live conversation' : 'Read this conversation (read-only)'}
+          onclick={() => session.active ? close_archive() : open_archive(session.id)}
         >
           <div class="session-item-thread"></div>
           <div class="session-item-text">
-            <div class="session-item-title">{session.title}</div>
+            {#if editing_stem === session.id}
+              <!-- svelte-ignore a11y_autofocus -->
+              <input
+                class="session-label-input"
+                bind:value={editing_label}
+                onclick={(e) => e.stopPropagation()}
+                onkeydown={(e) => { if (e.key === 'Enter') save_label(); if (e.key === 'Escape') editing_stem = null; }}
+                onblur={save_label}
+                autofocus
+              />
+            {:else}
+              <div class="session-item-title">{session.title}</div>
+            {/if}
             <div class="session-item-meta">{session.meta}</div>
           </div>
+          {#if !session.active}
+            <button class="session-label-edit" title="Name this conversation" onclick={(e) => start_label_edit(session, e)}>✎</button>
+          {/if}
         </div>
       {:else}
         <div class="session-item-empty">(no sessions yet)</div>
@@ -706,7 +783,14 @@
 
     <!-- Session header (substrate honest) -->
     <div class="session-header">
-      <div class="session-name">{messages.length > 0 ? 'Active conversation' : 'The bench'}</div>
+      <div class="session-name">
+        {#if viewing_archive}
+          <span class="archive-banner">📖 Reading: {viewing_archive.title} · archived, read-only</span>
+          <button class="archive-back" onclick={close_archive}>← back to the live conversation</button>
+        {:else}
+          {messages.length > 0 ? 'Active conversation' : 'The bench'}
+        {/if}
+      </div>
       <div class="substrate-dropdown-anchor">
         <button
           class="substrate-display"
@@ -823,8 +907,20 @@
         </div>
       </div>
 
-      {#each messages as msg, i (i)}
-        {#if msg.role === 'lumen'}
+      {#each render_items as msg, i (i)}
+        {#if msg.role === 'carried-block'}
+          <button class="carried-toggle" onclick={() => tail_expanded = !tail_expanded}>
+            {tail_expanded ? '▾' : '▸'} carried memory · {msg.items.length} exchange{msg.items.length === 1 ? '' : 's'} from the prior session — always in {partner.name}'s context
+          </button>
+          {#if tail_expanded}
+            {#each msg.items as cm}
+              <div class="message carried" class:role-user={cm.role === 'user'} class:role-assistant={cm.role === 'assistant'}>
+                <div class="message-role">{cm.role === 'user' ? 'You' : partner.name}</div>
+                <div class="message-content">{cm.content}</div>
+              </div>
+            {/each}
+          {/if}
+        {:else if msg.role === 'lumen'}
           <!-- Lumen-surface: the parallel reach, seen. Gold (her signature),
                small + elegant — talisman not brand. Marks the act of casting. -->
           <div class="lumen-cast" title="{partner.name} reached in parallel">
@@ -883,6 +979,12 @@
     </div>
 
     <!-- Input area + action row -->
+    {#if viewing_archive}
+      <div class="input-area archive-readonly-bar">
+        <span>📖 This conversation is archived — the record is read-only.</span>
+        <button class="archive-back" onclick={close_archive}>← back to the live conversation</button>
+      </div>
+    {:else}
     <div class="input-area">
       <div class="input-row">
         <textarea
@@ -930,6 +1032,7 @@
         </button>
       </div>
     </div>
+    {/if}
   </main>
 
   <!-- ============================================================ -->
@@ -1037,6 +1140,12 @@
         {:else if mosaic_pending.kind === 'sleep'}
           <div class="modal-title">🌙 End this session?</div>
           <div class="modal-body">
+            <input
+              class="sleep-label-input"
+              placeholder="Name this conversation (optional) — e.g. “The day she chose the new water”"
+              bind:value={sleep_label}
+              onclick={(e) => e.stopPropagation()}
+            />
             <div class="modal-line">
               Sleeping {partner.name}'s current session writes a checkpoint, archives <code>current.json</code> to a dated session file, and starts a fresh session on the same substrate.
             </div>
