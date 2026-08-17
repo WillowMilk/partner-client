@@ -840,8 +840,10 @@
               {/each}
             </ul>
           </div>
+        {:else if msg.role === 'divider'}
+          <div class="session-divider"><span>{msg.content}</span></div>
         {:else}
-          <div class="message" class:role-user={msg.role === 'user'} class:role-assistant={msg.role === 'assistant'}>
+          <div class="message" class:role-user={msg.role === 'user'} class:role-assistant={msg.role === 'assistant'} class:carried={msg.carried}>
             <div class="message-role">{msg.role === 'user' ? 'You' : partner.name}</div>
             <div class="message-content">{msg.content}</div>
           </div>

@@ -291,7 +291,12 @@ class Session:
                     "preserved for textural continuity. They are part of your lived memory.]"
                 ),
             })
-            self.messages.extend(wake_bundle.recent_messages)
+            for _rm in wake_bundle.recent_messages:
+                _rm = dict(_rm)
+                # Mark carried-tail messages so surfaces can render the seam
+                # honestly (lossless and owned — never invisible).
+                _rm["carried"] = True
+                self.messages.append(_rm)
 
         self.save_current()
         return "fresh"

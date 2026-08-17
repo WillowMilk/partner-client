@@ -668,6 +668,31 @@ code,
   border-left: 2px solid transparent;
 }
 
+/* Carried-tail messages: prior-session texture, rendered honestly dimmer.
+   The seam is lossless and owned — never invisible. */
+.message.carried {
+  opacity: 0.55;
+}
+
+/* Session seam: a labeled rule marking where a fresh session begins. */
+.session-divider {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  max-width: 760px;
+  margin: var(--space-8) 0;
+  color: var(--color-text-tertiary, #8a8577);
+  font-size: var(--text-micro);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+.session-divider::before,
+.session-divider::after {
+  content: "";
+  flex: 1;
+  border-top: 1px solid var(--color-border, #e3ddcf);
+}
+
 .message-role {
   font-size: var(--text-micro);
   text-transform: uppercase;

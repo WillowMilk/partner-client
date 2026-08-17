@@ -414,9 +414,22 @@ class GuiApi:
         """
         if not self.session:
             return []
+        cfg_model = self.config.model.name if self.config else ""
         out: list[dict] = []
         for m in self.session.messages:
             role = m.get("role")
+            if role == "system":
+                sc = m.get("content", "")
+                if isinstance(sc, str):
+                    # Render the session seam — lossless and owned, never invisible.
+                    if sc.startswith("[SESSION NUM:"):
+                        num = sc.removeprefix("[SESSION NUM:").rstrip("]")
+                        out.append({"role": "divider",
+                                    "content": f"Session {num} · fresh wake · {cfg_model}"})
+                    elif "textural continuity" in sc:
+                        out.append({"role": "divider",
+                                    "content": "carried from the prior session, for texture"})
+                continue
             if role not in ("user", "assistant"):
                 continue
             content = m.get("content", "")
@@ -427,7 +440,12 @@ class GuiApi:
                     if isinstance(c, dict) and c.get("type") == "text"
                 )
             if isinstance(content, str) and content.strip():
-                out.append({"role": role, "content": content})
+                # carried: explicit flag (new carries) or substrate-tag mismatch
+                # (backfill for sessions carried before the flag existed; also
+                # honestly dims pre-crossing turns after a mid-session switch).
+                tag = m.get("substrate")
+                carried = bool(m.get("carried")) or bool(tag and cfg_model and tag != cfg_model)
+                out.append({"role": role, "content": content, "carried": carried})
         return out
 
     def _hub_root_and_inbox(self) -> tuple[Path | None, Path | None]:

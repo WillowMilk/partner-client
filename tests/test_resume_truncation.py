@@ -435,3 +435,29 @@ def test_fresh_wake_after_corruption_keeps_the_preserved_copy(tmp_path: Path) ->
     assert preserved[0].read_text(encoding="utf-8") == corrupt_bytes
     # The new current.json is the fresh session, valid JSON.
     assert json.loads(session.current_path.read_text(encoding="utf-8"))
+
+
+def test_fresh_wake_marks_carried_tail(tmp_path):
+    """Carried-tail messages are flagged carried=True so surfaces can render
+    the seam honestly (lossless and owned — never invisible)."""
+    session = _make_session(tmp_path)
+
+    wake_bundle = MagicMock()
+    wake_bundle.system_prompt = "wake bundle"
+    wake_bundle.recent_messages = [
+        {"role": "user", "content": "old-u", "substrate": "gemma4:31b-cloud"},
+        {"role": "assistant", "content": "old-a", "substrate": "gemma4:31b-cloud"},
+    ]
+
+    status = session.wake(wake_bundle, resume_mode="fresh")
+    assert status == "fresh"
+
+    carried = [m for m in session.messages if m.get("carried")]
+    assert len(carried) == 2
+    assert all(m.get("carried") is True for m in carried)
+    # Original substrate tags survive the carry (provenance preserved)
+    assert all(m.get("substrate") == "gemma4:31b-cloud" for m in carried)
+    # And the tail-header system message precedes them
+    headers = [m for m in session.messages
+               if m.get("role") == "system" and "textural continuity" in str(m.get("content"))]
+    assert len(headers) == 1
