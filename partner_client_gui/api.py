@@ -357,17 +357,23 @@ class GuiApi:
                 "mtime": cp.stat().st_mtime,
             })
         try:
+            # Archives are written as "<YYYY-MM-DD>_session-<NNN>.json"
+            # (session._archive_current). The old glob "session-*.json" never
+            # matched that shape — the sidebar was structurally blind to
+            # archives until 2026-08-16 (found by Willow, first live use).
             archives = sorted(
-                [p for p in sd.glob("session-*.json") if p.is_file()],
+                [p for p in sd.glob("*session-*.json") if p.is_file()],
                 key=lambda p: p.stat().st_mtime,
                 reverse=True,
             )[:10]
         except Exception:
             archives = []
         for p in archives:
+            m = re.match(r"(\d{4}-\d{2}-\d{2})_session-(\d+)$", p.stem)
+            title = f"Session {int(m.group(2))}" if m else p.stem.replace("_", " ").replace("session-", "Session ")
             entries.append({
                 "id": p.stem,
-                "title": p.stem.replace("_", " ").replace("session-", "Session "),
+                "title": title,
                 "meta": time.strftime("%b %d", time.localtime(p.stat().st_mtime)),
                 "active": False,
                 "mtime": p.stat().st_mtime,
