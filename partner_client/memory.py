@@ -202,7 +202,8 @@ class Memory:
         if not self.sessions_dir.is_dir():
             return None
         files = sorted(
-            f for f in self.sessions_dir.glob("*.json") if f.name != "current.json"
+            f for f in self.sessions_dir.glob("*.json")
+            if f.name != "current.json" and not f.name.startswith(".")
         )
         return files[-1] if files else None
 

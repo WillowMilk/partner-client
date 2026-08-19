@@ -273,6 +273,7 @@ class Session:
             self._archive_current(existing)
 
         # Fresh session
+        self.closed = False
         self.session_num = self.memory.next_session_number()
         self.started_at = datetime.now()
         self.messages = [
@@ -354,7 +355,14 @@ class Session:
         Atomic: writes to current.json.tmp first, then os.replaces. Crash mid-write
         leaves the previous current.json intact rather than producing a truncated
         file that _read_current would silently treat as missing.
+
+        Closed-guard (litigator 2026-08-19, CONFIRMED high): a slept session
+        must NEVER resurrect current.json — the resurrection mechanism behind
+        the hall-of-mirrors night. Once closed, saves are refused loudly.
         """
+        if getattr(self, "closed", False):
+            log.warning("save_current refused: session is closed (slept); a slept session never resurrects current.json")
+            return
         try:
             text = json.dumps(
                 self._serializable_messages(),

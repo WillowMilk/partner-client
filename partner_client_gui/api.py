@@ -362,7 +362,7 @@ class GuiApi:
             # matched that shape — the sidebar was structurally blind to
             # archives until 2026-08-16 (found by Willow, first live use).
             archives = sorted(
-                [p for p in sd.glob("*session-*.json") if p.is_file()],
+                [p for p in sd.glob("*session-*.json") if p.is_file() and not p.name.startswith(".")],
                 key=lambda p: p.stat().st_mtime,
                 reverse=True,
             )[:10]
