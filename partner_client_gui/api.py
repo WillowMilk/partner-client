@@ -167,6 +167,33 @@ class GuiApi:
         a handle for pushing streaming deltas to the JS side."""
         self._window = window
 
+        # The operator gate (2026-08-19): an out-of-scope reach raises a
+        # native confirm dialog at the desk instead of a flat refusal.
+        # No window / any error → decline (fail-closed).
+        from partner_client.paths import install_out_of_scope_gate
+
+        def _gui_gate(path: str, mode: str) -> bool:
+            try:
+                if self._window is None:
+                    return False
+                partner = "The partner"
+                try:
+                    partner = self.config.identity.name if self.config else partner
+                except Exception:
+                    pass
+                js = (
+                    "confirm(" + json.dumps(
+                        f"{partner} asks to {mode} OUTSIDE her home scopes:\n\n{path}\n\n"
+                        f"Allow this once?"
+                    ) + ")"
+                )
+                return bool(self._window.evaluate_js(js))
+            except Exception:
+                log.exception("operator gate dialog failed; declining (fail-closed)")
+                return False
+
+        install_out_of_scope_gate(_gui_gate)
+
     # ============================================================
     # Lifecycle (called from launch.py BEFORE webview opens)
     # ============================================================

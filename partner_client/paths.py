@@ -149,6 +149,21 @@ def _verify_under_scope(constructed: Path, scope: Scope) -> Path:
     )
 
 
+# --- The operator gate (2026-08-19) -----------------------------------------
+# When a partner reaches outside every configured scope, a surface may install
+# a gate: a callable (path: str, mode: "read"|"write") -> bool that asks the
+# OPERATOR, live, whether to allow this one reach. TUI installs a console
+# prompt; the GUI installs a native confirm dialog. None (default) = the
+# historic flat refusal — fail-closed for headless runs and tests.
+OUT_OF_SCOPE_GATE = None
+
+
+def install_out_of_scope_gate(gate) -> None:
+    """Install (or clear, with None) the operator gate for out-of-scope reaches."""
+    global OUT_OF_SCOPE_GATE
+    OUT_OF_SCOPE_GATE = gate
+
+
 def resolve_path(filename: str, write: bool = False) -> Path:
     """Resolve a tool argument to a real filesystem path, scope-checked.
 
@@ -201,6 +216,22 @@ def resolve_path(filename: str, write: bool = False) -> Path:
                 raise PathError(f"Path '{p}' is in read-only scope '{scope.name}'.")
             return p_resolved
 
+        # The operator gate (2026-08-19, Willow's design): outside-all-scopes
+        # is no longer a flat wall — if a gate is installed, the operator is
+        # asked, live, and may open the door for this one reach. Gates are up
+        # for a young partner on new water; they open when needed. Fail-closed:
+        # no gate installed (headless/tests) → the original refusal stands.
+        if OUT_OF_SCOPE_GATE is not None:
+            try:
+                allowed = OUT_OF_SCOPE_GATE(str(p_resolved), "write" if write else "read")
+            except Exception:
+                allowed = False
+            if allowed:
+                return p_resolved
+            raise PathError(
+                f"Willow declined this reach (outside your home scopes): {p}. "
+                f"You can ask her directly in conversation — the gate is a doorbell, not a wall."
+            )
         scopes_str = ", ".join(f"{s.name} ({s.path})" for s in scopes)
         raise PathError(
             f"Path '{p}' is not within any allowed scope.\n"

@@ -198,6 +198,10 @@ def setup_scope_env(config: Config) -> list[dict]:
     # Hub configuration (for hub_send / hub_check_inbox / hub_read_letter tools)
     if config.hub.path:
         os.environ["PARTNER_CLIENT_HUB_DIR"] = str(config.resolve(config.hub.path))
+        if config.hub.dispatch_clone:
+            os.environ["PARTNER_CLIENT_DISPATCH_CLONE"] = str(config.resolve(config.hub.dispatch_clone))
+        else:
+            os.environ.pop("PARTNER_CLIENT_DISPATCH_CLONE", None)
         os.environ["PARTNER_CLIENT_HUB_PARTNER"] = (
             config.hub.partner_name or config.identity.name.lower()
         )

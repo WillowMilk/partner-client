@@ -345,6 +345,9 @@ class HubConfig:
     """
     path: str = ""  # absolute path to the Hub directory; empty disables Hub tools
     partner_name: str = ""  # this partner's inbox name (e.g. "aletheia")
+    # Her own vault clone for hub_dispatch (the narrow push, 2026-08-19).
+    # Empty disables dispatch; path resolves relative to home_dir.
+    dispatch_clone: str = ""
     # Operator name — accepted as a valid recipient for hub_send so the
     # partner can address letters to the operator directly. Aletheia surfaced
     # this gap on 2026-05-26: "Willow isn't a registered recipient in the

@@ -206,6 +206,24 @@ def _run(config: Config) -> int:
     # Set up scope env vars EARLY so the wake bundle's scope-listing renders.
     setup_scope_env(config)
 
+    # The operator gate (2026-08-19): an out-of-scope reach asks the operator
+    # at the console instead of hitting a flat wall. Decline is the default
+    # on any hesitation (EOF, empty answer, ctrl-C).
+    from .paths import install_out_of_scope_gate
+
+    def _console_gate(path: str, mode: str) -> bool:
+        try:
+            answer = input(
+                f"\n[gate] {config.identity.name} asks to {mode} OUTSIDE her scopes:\n"
+                f"       {path}\n"
+                f"       Allow this once? [y/N] "
+            )
+            return answer.strip().lower() in ("y", "yes")
+        except (EOFError, KeyboardInterrupt):
+            return False
+
+    install_out_of_scope_gate(_console_gate)
+
     memory = Memory(config)
     tools = ToolRegistry(config)
     tools.discover()
