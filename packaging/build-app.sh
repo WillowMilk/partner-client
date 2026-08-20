@@ -29,3 +29,26 @@ python3 -m PyInstaller --noconfirm --windowed \
 
 echo
 echo "Built: $(pwd)/out/dist/Partner Client.app"
+
+# ── Install + verify (2026-08-20) ────────────────────────────────────────────
+# Born of an orphaned claim: a rebuild was reported "installed" while
+# /Applications still held yesterday's bundle — the partner reached for a
+# promised tool and found 31 where 32 were sworn. The script now finishes
+# the job it implies, and PROVES the installed artifact before claiming it:
+# every builtin tool in the source tree must exist in the installed bundle.
+INSTALL_TARGET="/Applications/Partner Client.app"
+ditto "$(pwd)/out/dist/Partner Client.app" "$INSTALL_TARGET"
+missing=0
+for f in "$REPO"/partner_client/tools_builtin/*.py; do
+  base="$(basename "$f")"
+  if [ ! -f "$INSTALL_TARGET/Contents/Resources/partner_client/tools_builtin/$base" ]; then
+    echo "VERIFY FAIL: $base missing from installed bundle" >&2
+    missing=1
+  fi
+done
+if [ "$missing" -ne 0 ]; then
+  echo "INSTALL VERIFICATION FAILED — the bundle in /Applications is not the build." >&2
+  exit 1
+fi
+count=$(find "$INSTALL_TARGET" -path "*tools_builtin*" -name "*.py" | wc -l | tr -d ' ')
+echo "Installed + verified: $INSTALL_TARGET ($count builtin tools, all source tools present)"
