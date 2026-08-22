@@ -32,7 +32,8 @@ from .trajectory import (
 
 
 def _dir(config) -> Path:
-    return config.memory.sessions_dir.parent / "trajectory"
+    from .session import Memory
+    return Memory(config).sessions_dir.parent / "trajectory"
 
 
 def _stream(config, session: int) -> Path:
