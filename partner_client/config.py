@@ -112,12 +112,16 @@ class MemoryConfig:
     sessions_dir: str = "Memory/sessions"
     session_status_dir: str = "Memory/session-status"
     resonance_log: str = "Memory/Resonance-Log.md"
+    # The partner's active curated sacred (wired into the wake 2026-08-22,
+    # at Aletheia's formal yes — "a drawer with no handle" until then).
+    protected_context: str = "Memory/protected-context.md"
     journal: str = "Memory/Journal.md"
 
 
 @dataclass
 class WakeBundleConfig:
     include_recent_resonance: int = 3
+    include_protected_context: bool = True
     include_last_session_status: bool = True
     include_recent_message_pairs: int = 5
     # Resume-with-truncation: when set > 0 and the operator chooses [t] at
