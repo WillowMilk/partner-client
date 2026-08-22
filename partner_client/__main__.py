@@ -152,7 +152,7 @@ def main() -> int:
         "subcommand",
         nargs="?",
         default="chat",
-        choices=["chat", "doctor", "distill"],
+        choices=["chat", "doctor", "distill", "trajectory"],
         help=(
             "What to do. 'chat' (default) opens an interactive session. "
             "'doctor' runs health checks against the config and exits. "
@@ -183,6 +183,10 @@ def main() -> int:
     if args.subcommand == "distill":
         from .distill.cli import run_distill_cli
         return run_distill_cli(config, distill_args)
+
+    if args.subcommand == "trajectory":
+        from .trajectory_cli import run_trajectory_cli
+        return run_trajectory_cli(config, distill_args)
 
     # Resolve which model to use (chat path only — doctor/distill above are
     # subcommand short-circuits). CLI flag wins over interactive picker

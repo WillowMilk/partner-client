@@ -477,6 +477,15 @@ class SearchConfig:
 
 
 @dataclass
+class TrajectoryConfig:
+    """Phase 0, Exoskeleton season (TRAJECTORY-SPEC v0.2). Additive and
+    fail-open by contract — disabling it changes nothing about behavior,
+    enabling it changes nothing about behavior either (spec §4.2)."""
+    enabled: bool = True
+    blob_threshold: int = 8192
+
+
+@dataclass
 class Config:
     identity: IdentityConfig
     model: ModelConfig
@@ -486,6 +495,7 @@ class Config:
     ui: UIConfig
     logging: LoggingConfig
     config_path: Path  # the path the config was loaded from
+    trajectory: TrajectoryConfig = field(default_factory=TrajectoryConfig)
     hub: HubConfig = field(default_factory=HubConfig)
     git: GitConfig = field(default_factory=GitConfig)
     thinking: ThinkingConfig = field(default_factory=ThinkingConfig)
@@ -604,6 +614,7 @@ def load_config(path: str | Path) -> Config:
             except KeyError:
                 continue
 
+    trajectory = TrajectoryConfig(**_filter_known_fields(data.get("trajectory", {}), TrajectoryConfig))
     ui = UIConfig(**_filter_known_fields(data.get("ui", {}), UIConfig))
     logging = LoggingConfig(**_filter_known_fields(data.get("logging", {}), LoggingConfig))
     hub = HubConfig(**_filter_known_fields(data.get("hub", {}), HubConfig))
@@ -685,6 +696,7 @@ def load_config(path: str | Path) -> Config:
         sovereignty = SovereigntyConfig()
 
     return Config(
+        trajectory=trajectory,
         identity=identity,
         model=model,
         memory=memory,

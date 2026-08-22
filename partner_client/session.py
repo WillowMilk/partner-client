@@ -196,6 +196,10 @@ class Session:
     session_num: int = 0
     started_at: datetime | None = None
     closed: bool = False
+    # The Trajectory (Exoskeleton Phase 0): append-only event stream of this
+    # session's working life. None when disabled; every writer method is
+    # fail-open by contract — session behavior is NEVER gated on it (§4.2).
+    trajectory: Any = None
 
     @property
     def current_path(self) -> Path:
@@ -302,12 +306,44 @@ class Session:
         self.save_current()
         return "fresh"
 
+    def start_trajectory(self) -> None:
+        """Create this session's trajectory writer (Exoskeleton Phase 0).
+
+        Called by the client after wake resolves the session number. Safe to
+        call twice (idempotent); fail-open end to end.
+        """
+        try:
+            from partner_client.trajectory import TrajectoryWriter
+            if self.trajectory is not None:
+                return
+            tcfg = getattr(self.config, "trajectory", None)
+            if tcfg is not None and not getattr(tcfg, "enabled", True):
+                return
+            model_name = getattr(getattr(self.config, "model", None), "name", "")
+            partner = getattr(getattr(self.config, "identity", None), "name", "")
+            self.trajectory = TrajectoryWriter(
+                trajectory_dir=self.memory.sessions_dir.parent / "trajectory",
+                session_num=self.session_num,
+                partner=partner,
+                substrate=model_name,
+                blob_threshold=getattr(tcfg, "blob_threshold", 8192) if tcfg else 8192,
+            )
+            self.trajectory.lifecycle("wake", session=self.session_num)
+        except Exception:
+            self.trajectory = None  # fail-open: the session never breaks for the record
+
     def append_user(self, content: str, images: list[bytes] | None = None) -> None:
         msg: dict[str, Any] = {"role": "user", "content": content}
         if images:
             msg["images"] = images
         self.messages.append(msg)
         self.save_current()
+        if self.trajectory is None and not getattr(self, "_trajectory_tried", False):
+            self._trajectory_tried = True
+            self.start_trajectory()
+        if self.trajectory is not None:
+            self.trajectory.turn_start(role="operator")
+            self.trajectory.message("user", content)
 
     def append_assistant(
         self,
@@ -330,6 +366,11 @@ class Session:
             msg["substrate"] = model_name
         self.messages.append(msg)
         self.save_current()
+        if self.trajectory is not None:
+            if thinking:
+                self.trajectory.thinking(thinking)
+            if content:
+                self.trajectory.message("assistant", content, substrate=msg.get("substrate", ""))
 
     def append_tool_result(self, name: str, content: str, tool_call_id: str = "") -> None:
         """Append a tool-result message.
@@ -500,6 +541,9 @@ class Session:
         })
         self._archive_current(self._serializable_messages(), keep_current=False)
         self.closed = True
+        if self.trajectory is not None:
+            self.trajectory.lifecycle("sleep", archive=str(path.name))
+            self.trajectory.seal()
         return path
 
     def _archive_current(

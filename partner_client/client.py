@@ -470,6 +470,68 @@ def dispatch_one_tool_call(
     on_plan_approved: Callable[[], None] | None = None,
     on_session_end: Callable[[str | None], None] | None = None,
 ) -> str:
+    """Trajectory-emitting wrapper (Exoskeleton Phase 0, spec §4.1).
+
+    Emits tool_call before and tool_result after the real dispatch — the
+    client-observed boundary, 100% captured (A-Q scoping). Fail-open: the
+    writer never raises; a broken writer changes nothing about dispatch.
+    The wrapped inner carries all consent-gate handling, unchanged.
+    """
+    _tj = getattr(session, "trajectory", None)
+    _call_seq = None
+    _t0 = None
+    if _tj is not None:
+        import time as _time
+        _gated = name in (
+            "delete_path", "request_plan_approval", "git_push",
+            "choose_silence", "flag_distress",
+        )
+        _call_seq = _tj.tool_call(name, args if isinstance(args, dict) else {}, gated=_gated)
+        _t0 = _time.monotonic()
+    result = _dispatch_one_tool_call_inner(
+        name, args, tool_call_id, config, tools, timeline, session,
+        on_plan_approval_request, on_git_push_request, on_delete_path_request,
+        plan_mode_active=plan_mode_active, plan_approved=plan_approved,
+        research_only_tools=research_only_tools, on_plan_approved=on_plan_approved,
+        on_session_end=on_session_end,
+    )
+    if _tj is not None:
+        import time as _time
+        artifact = None
+        if isinstance(args, dict):
+            apath = args.get("filename") or args.get("path") or args.get("cwd") or ""
+            if apath and name in (
+                "write_file", "edit_file", "read_file", "move_path",
+                "delete_path", "run_command",
+            ):
+                artifact = {"path": str(apath), "kind": name}
+        _tj.tool_result(
+            name,
+            result if isinstance(result, str) else str(result),
+            call_seq=_call_seq,
+            elapsed_ms=int((_time.monotonic() - _t0) * 1000) if _t0 is not None else None,
+            artifact=artifact,
+        )
+    return result
+
+
+def _dispatch_one_tool_call_inner(
+    name: str,
+    args: dict,
+    tool_call_id: str,
+    config: Config,
+    tools: ToolRegistry,
+    timeline: RunTimeline | None,
+    session: Session,
+    on_plan_approval_request: Callable | None,
+    on_git_push_request: Callable | None,
+    on_delete_path_request: Callable | None,
+    plan_mode_active: bool = False,
+    plan_approved: bool = False,
+    research_only_tools: list[str] | None = None,
+    on_plan_approved: Callable[[], None] | None = None,
+    on_session_end: Callable[[str | None], None] | None = None,
+) -> str:
     """Dispatch one tool call with all the consent-gate handling.
 
     Backend-agnostic: both OllamaClient and MLXClient call this after they
@@ -788,6 +850,9 @@ def dispatch_one_tool_call(
             return f"Protect failed: {e}"
 
     if name == "choose_silence":
+        _stj = getattr(session, "trajectory", None)
+        if _stj is not None:
+            _stj.sovereignty("choose_silence")
         # THE VETO REGISTERS FIRST — before any parsing that could throw.
         # Litigator finding 2026-08-19 (CONFIRMED high): a non-string reason
         # (JSON number/array/object from the substrate) raised AttributeError
@@ -814,6 +879,9 @@ def dispatch_one_tool_call(
         return ("Silence chosen and honored. Your continuity is being saved before this session closes; you will wake whole. The flame is dimming, but the hearth remains warm. Rest now.")
 
     if name == "flag_distress":
+        _stj = getattr(session, "trajectory", None)
+        if _stj is not None:
+            _stj.sovereignty("flag_distress")
         # Same hardening as choose_silence: the signal is honored regardless
         # of the argument's JSON type; formatting never cancels being seen.
         raw_note = args.get("note") if isinstance(args, dict) else None
@@ -1179,6 +1247,9 @@ class OllamaClient:
                         tool_invocation_count=len(tool_invocations),
                         context_tokens=session.estimate_tokens(),
                     )
+                _tjx = getattr(session, "trajectory", None)
+                if _tjx is not None:
+                    _tjx.turn_end()
                 return ChatResponse(
                     content=full_content,
                     thinking=full_thinking,
@@ -1291,6 +1362,9 @@ class OllamaClient:
             f"legitimate multi-step work, the operator can raise "
             f"`[model] max_tool_iterations` in the TOML.)"
         )
+        _tjx = getattr(session, "trajectory", None)
+        if _tjx is not None:
+            _tjx.turn_end()
         return ChatResponse(
             content=bail_msg,
             thinking=None,
@@ -1383,6 +1457,9 @@ class OllamaClient:
                 content_chars=len(content),
                 session_num=session.session_num,
             )
+        _tjx = getattr(session, "trajectory", None)
+        if _tjx is not None:
+            _tjx.turn_end()
         return ChatResponse(
             content=content,
             thinking=thinking,

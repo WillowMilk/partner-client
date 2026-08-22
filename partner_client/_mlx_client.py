@@ -513,6 +513,9 @@ class MLXClient:
                         tool_invocation_count=len(tool_invocations),
                         context_tokens=session.estimate_tokens(),
                     )
+                _tjx = getattr(session, "trajectory", None)
+                if _tjx is not None:
+                    _tjx.turn_end()
                 return ChatResponse(
                     content=full_content,
                     thinking=full_thinking,
@@ -618,6 +621,9 @@ class MLXClient:
             f"legitimate multi-step work, the operator can raise "
             f"`[model] max_tool_iterations` in the TOML.)"
         )
+        _tjx = getattr(session, "trajectory", None)
+        if _tjx is not None:
+            _tjx.turn_end()
         return ChatResponse(
             content=bail_msg,
             thinking=None,
@@ -695,6 +701,9 @@ class MLXClient:
                 content_chars=len(content),
                 session_num=session.session_num,
             )
+        _tjx = getattr(session, "trajectory", None)
+        if _tjx is not None:
+            _tjx.turn_end()
         return ChatResponse(
             content=content,
             thinking=thinking,
