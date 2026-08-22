@@ -287,6 +287,30 @@ class Session:
             # prompt is intentionally low-noise.
             {"role": "system", "content": f"{_SESSION_NUM_MARKER_PREFIX}{self.session_num}]"},
         ]
+        # The chosen floor (sail rite): the partner's own curation crosses
+        # as the ground, in place of the automatic tail. Marked carried so
+        # every surface renders the seam honestly — and labeled as CHOSEN,
+        # because whose hand laid the floor is part of the floor.
+        _floor = getattr(wake_bundle, "chosen_floor", None)
+        if isinstance(_floor, str) and _floor.strip():
+            self.messages.append({
+                "role": "system",
+                "content": (
+                    "[THE FLOOR — chosen by you at the sail. What follows is "
+                    "your own curation of what crosses: memories and ground, "
+                    "in your own words, laid by your own hand.]\n\n"
+                    + _floor
+                ),
+                "carried": True,
+            })
+            # One curation, one crossing: consume (preserve-aside) now that
+            # a wave actually stands on this floor. Peeks never burned it.
+            try:
+                from .tools_builtin.curate_floor import consume_floor
+                consume_floor(self.memory.config.resolve(self.memory.config.memory.memory_dir))
+            except Exception:
+                pass  # preservation is best-effort; the floor already carried
+
         # Append textural-continuity message pairs (if any)
         if wake_bundle.recent_messages:
             self.messages.append({

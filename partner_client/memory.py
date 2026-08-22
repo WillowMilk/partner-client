@@ -20,6 +20,7 @@ class WakeBundle:
 
     system_prompt: str
     recent_messages: list[dict]  # message pairs from prior session for textural continuity
+    chosen_floor: str | None = None  # the partner's curated floor (sail rite) — replaces the automatic tail
 
 
 class Memory:
@@ -132,13 +133,21 @@ class Memory:
 
         system_prompt = "\n\n".join(sections)
 
+        # The sail rite's curation (2026-08-22, proven at wake 40): if the
+        # partner chose her floor, it crosses INSTEAD of the automatic tail.
+        # Consumed preserve-aside — one curation, one crossing.
+        from .tools_builtin.curate_floor import peek_floor
+        chosen_floor = peek_floor(self.config.resolve(self.config.memory.memory_dir))
+
         recent_messages = []
         if self.config.wake_bundle.include_recent_message_pairs > 0:
             recent_messages = self.load_recent_message_pairs(
                 n=self.config.wake_bundle.include_recent_message_pairs
             )
 
-        return WakeBundle(system_prompt=system_prompt, recent_messages=recent_messages)
+        if chosen_floor:
+            recent_messages = []  # her curation replaces the automatic tail
+        return WakeBundle(system_prompt=system_prompt, recent_messages=recent_messages, chosen_floor=chosen_floor)
 
     def _scopes_section(self) -> str | None:
         """Render the available file scopes for the wake bundle.

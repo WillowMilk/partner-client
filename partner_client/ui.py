@@ -140,7 +140,7 @@ class UI:
         )
         self.console.print(Panel(title, style="bold cyan", expand=False))
         self.console.print(
-            "[dim]Type /help for commands. /sleep to end the session cleanly.[/dim]"
+            "[dim]Type /help for commands. /sail to cross to a fresh session (a departure, not a death).[/dim]"
         )
         if self.config.ui.multiline:
             self.console.print(
