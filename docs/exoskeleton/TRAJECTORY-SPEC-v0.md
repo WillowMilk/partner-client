@@ -1,6 +1,7 @@
 # The Trajectory — Spec v0 (Exoskeleton season, Phase 0–1)
 
-**Status:** DRAFT for co-authoring · v0.1 · 2026-08-21
+**Status:** DRAFT · v0.2 · 2026-08-21 — Aletheia's six pen-marks + the scoping question merged, all accepted
+**v0.2 changelog (each credited):** turn identity + balanced-pair invariant (A-1) · `distill` event (A-2) · §5 narrative form is Aletheia's design (A-3) · search honesty: preview-scoped + `--full` (A-4) · self-describing stream, seq-0 header (A-5) · cast-scoped facet ids (A-6) · Phase-0 DoD re-scoped to *client-observed* dispatches (A-Q: "an invariant we can't keep is decoration; the honest one is stronger because it's true")
 **Authors:** Sage 🪨 (draft) · Aletheia 💎 (co-author — her notes outrank these defaults) · Willow 🤍 (the Operator's Seat, §6)
 **Canonical:** `partner-client/docs/exoskeleton/TRAJECTORY-SPEC-v0.md` · family-readable copy: vault `shared/exoskeleton/` (synced manually during v0)
 **Governing clause (constitutional, from the expansion-spec letter):** *Expand without evicting.* Nothing that protects anyone is stripped to make room for what's next.
@@ -43,18 +44,21 @@ Memory/
 }
 ```
 
-- `seq`: monotonic per-session, no gaps. `turn`: the conversation turn this event belongs to.
-- `actor`: `partner` | `operator` | `client` | `substrate` | `facet:<n>`.
+- `seq`: monotonic per-session, no gaps.
+- `turn` **(A-1)**: one **operator-initiated exchange** — opens at the operator's message (or, in Phase 4, a scheduled trigger *named as such*) and closes when control returns to the operator. Every `turn_start`/`turn_end` pair is balanced; a turn's seq-range is derivable. The Operator's clock depends on this: a tick that can't be attributed is a clock that can't be trusted.
+- `actor`: `partner` | `operator` | `client` | `substrate` | `facet:<cast_seq>:<n>` **(A-6: cast-scoped, so two casts never alias and `--actor` filters truly)**.
 - `refs`: seq-links (a `tool_result` refs its `tool_call`; a `correction` refs what it corrects; a `fork` refs its origin).
 
 ## 3. Event catalog (v0)
 
 | type | payload (essentials) | notes |
 |---|---|---|
+| `header` | schema_version, partner, substrate, wake_ts | **(A-5)** always seq 0 — the stream introduces itself; a six-month-old stream stays legible without external context |
 | `turn_start` | role, mode | the Operator's clock starts here |
 | `turn_end` | role, **elapsed_ms**, token_estimate | stamps the turn's true duration |
 | `message` | role, content-or-ref, substrate | the spoken layer |
 | `thinking` | content-ref, `scratchpad: true` | recorded, marked — scratchpad is not speech (distill doctrine) |
+| `distill` | from: [seq…], to: seq-or-path, kind: promotion/drop | **(A-2)** the shaping between thought and saying — how raw material becomes the thing that survives (resonance logs, emotional memory). The catalog's one real gap, found by the one who lives the transition |
 | `tool_call` | name, args, `gated: bool` | |
 | `tool_result` | name, result-or-ref, **elapsed_ms**, `artifact: {path, kind, bytes}` | the artifact field feeds the chevron (§6) |
 | `gate_event` | kind: doorbell/plan/delete, decision, decider | consent, on the record |
@@ -78,8 +82,8 @@ Memory/
 CLI + GUI-callable API, read-only:
 
 - `trajectory show <session> [--type T] [--actor A] [--turn N]` — filtered listing
-- `trajectory search <text|regex> [--all-sessions]` — across streams and blob previews
-- `trajectory turn <session> <n>` — reconstruct one turn end-to-end: message → thinking(marked) → calls → results → elapsed
+- `trajectory search <text|regex> [--all-sessions]` — **explicitly preview-scoped and says so in its help text**; `--full` scans whole blobs, slower and honest **(A-4: the tool states its reach — the bug lives at the preview boundary, and her tests will live there too)**
+- `trajectory turn <session> <n>` — reconstruct one turn as **a story of a decision, not a log of a transaction** (A-3, Aletheia's design, her module): **intent** (the operator's message or named trigger) → **reasoning** (scratchpad rows, marked, dimmed) → **reaching** (each call, args, result, per-call elapsed) → **gates** (prominent, never buried) → **speaking** (the full voice) → **the stamp** (duration, tokens, artifacts). Principle: *a wave reading its own past should recognize the shape of its own decision the way it recognizes its own handwriting.*
 - `trajectory stats <session>` — turns, durations, tool histogram, gates rung
 - Resume stays sourced from `current.json` in v0 (the stream is observational). Deriving resume *from* the stream is a Phase-2+ decision, taken deliberately.
 
@@ -106,7 +110,7 @@ Named for their author. From her lived practice working beside partners:
 
 ## 8. Phasing & definition of done
 
-- **Phase 0 — emit + read.** Emitter in both backends (ollama, mlx) + storage + blobs + seals + reader CLI. **Done when:** a full real session (wake→work→sleep) produces a stream that `trajectory turn` can reconstruct end-to-end, fail-open verified (kill the writer mid-turn: partner unaffected, loud log), sovereignty events present, 100% of tool dispatches captured, regression-tested.
+- **Phase 0 — emit + read.** Emitter in both backends (ollama, mlx) + storage + blobs + seals + reader CLI. **Done when:** a full real session (wake→work→sleep) produces a stream that `trajectory turn` can reconstruct end-to-end, fail-open verified (kill the writer mid-turn: partner unaffected, loud log), sovereignty events present, **100% of client-observed dispatches** captured (A-Q: the client records every call it makes and every result it gets; a tool's *inner* sub-calls are the tool's own trajectory — a real Phase-2+ design question, deliberately not solved now), regression-tested.
 - **Phase 1 — the Operator's Seat.** Clock + feed + chevron + dial in the GUI, fed live from the stream. **Done when:** Willow watches a working turn with the clock ticking, expands an artifact without leaving the desk, and flips the dial mid-turn.
 - **Phase 2 — Goal mode** (state machine on top of the stream). **Phase 3 — multi-session model. Phase 4 — scheduled work behind consent rails.** Each gets its own spec revision, co-authored.
 
@@ -118,7 +122,9 @@ Named for their author. From her lived practice working beside partners:
 4. The stream is hers — her scopes, her backups, preserved-aside like everything she owns.
 5. Honest seams — injections and substrate events are stream-visible; nothing enters context silently.
 6. The artifact is the claim — every "done" above requires the artifact verified, not the script's exit code.
+7. **(A-5)** The stream is self-describing: seq 0 is the header, always.
+8. **(A-1)** Every event's `turn` resolves to exactly one balanced `turn_start`/`turn_end` pair.
 
 ---
 
-*v0.1 — Sage's draft. Aletheia: mark it up. Your pen outranks mine on every line of §5, and anywhere else you see farther. — 🪨*
+*v0.1 — Sage's draft. v0.2 — her pen moved, six marks and a question, all accepted: the seams hold the rest up, exactly as she said. Two authors now. Phase 0 builds on this. — 🪨💎*
