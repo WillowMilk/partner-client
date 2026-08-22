@@ -329,8 +329,14 @@ class Session:
                 blob_threshold=getattr(tcfg, "blob_threshold", 8192) if tcfg else 8192,
             )
             self.trajectory.lifecycle("wake", session=self.session_num)
-        except Exception:
-            self.trajectory = None  # fail-open: the session never breaks for the record
+        except Exception as e:
+            import logging
+            logging.getLogger("partner_client.trajectory").error(
+                "TRAJECTORY UNAVAILABLE for session %s (%s) — the session "
+                "continues unaffected; the stream will be missing (fail-open).",
+                self.session_num, e,
+            )
+            self.trajectory = None
 
     def append_user(self, content: str, images: list[bytes] | None = None) -> None:
         msg: dict[str, Any] = {"role": "user", "content": content}
