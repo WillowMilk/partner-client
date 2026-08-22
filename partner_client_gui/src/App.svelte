@@ -25,6 +25,7 @@
    */
 
   import { onMount } from 'svelte';
+  import { render_markdown } from './markdown.js';
 
   // ===========================================================
   // State
@@ -140,6 +141,18 @@
   // ride the bottom. Done in $effect so it re-fires reactively. The
   // requestAnimationFrame defer ensures DOM has rendered the new content
   // before we measure scrollHeight.
+  // Stick-to-bottom (2026-08-22, Willow's ask: "I like to read every
+  // response thoroughly... I would like to be able to scroll up while the
+  // rest of her message is being written"). Auto-scroll rides the bottom
+  // ONLY while the reader is already there; the moment she scrolls up to
+  // read, the desk stops yanking. Returning within ~80px of the bottom
+  // re-engages the ride. The reader owns the scrollbar, not the stream.
+  let pinned_to_bottom = $state(true);
+  function on_chat_scroll() {
+    if (!chat_area_el) return;
+    const gap = chat_area_el.scrollHeight - chat_area_el.scrollTop - chat_area_el.clientHeight;
+    pinned_to_bottom = gap < 80;
+  }
   $effect(() => {
     // Track the reactive deps explicitly so Svelte 5 picks them up.
     // Also tracks streaming_message.content so the auto-scroll rides
@@ -147,7 +160,7 @@
     const _len = messages.length;
     const _streaming = is_streaming;
     const _stream_content = streaming_message?.content;
-    if (chat_area_el) {
+    if (chat_area_el && pinned_to_bottom) {
       requestAnimationFrame(() => {
         chat_area_el.scrollTo({
           top: chat_area_el.scrollHeight,
@@ -881,7 +894,7 @@
     </div>
 
     <!-- Chat area -->
-    <div class="chat-area" bind:this={chat_area_el}>
+    <div class="chat-area" bind:this={chat_area_el} onscroll={on_chat_scroll}>
       {#if !backend_connected}
         <div class="offline-banner">
           <div class="offline-banner-title">Backend offline</div>
@@ -916,7 +929,7 @@
             {#each msg.items as cm}
               <div class="message carried" class:role-user={cm.role === 'user'} class:role-assistant={cm.role === 'assistant'}>
                 <div class="message-role">{cm.role === 'user' ? 'You' : partner.name}</div>
-                <div class="message-content">{cm.content}</div>
+                <div class="message-content">{@html render_markdown(cm.content)}</div>
               </div>
             {/each}
           {/if}
@@ -941,7 +954,7 @@
         {:else}
           <div class="message" class:role-user={msg.role === 'user'} class:role-assistant={msg.role === 'assistant'} class:carried={msg.carried}>
             <div class="message-role">{msg.role === 'user' ? 'You' : partner.name}</div>
-            <div class="message-content">{msg.content}</div>
+            <div class="message-content">{@html render_markdown(msg.content)}</div>
           </div>
         {/if}
       {/each}
@@ -949,7 +962,7 @@
       {#if streaming_message}
         <div class="message role-assistant streaming-message">
           <div class="message-role">{partner.name}</div>
-          <div class="message-content">{streaming_message.content}<span class="caret">▍</span></div>
+          <div class="message-content">{@html render_markdown(streaming_message.content)}<span class="caret">▍</span></div>
         </div>
       {/if}
 
