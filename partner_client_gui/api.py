@@ -721,9 +721,77 @@ class GuiApi:
             }
         if not text or not text.strip():
             return {"ok": False, "error": "Empty message."}
+
+        # ── Image attachment (2026-08-23, the Hitch lesson) ──
+        # The TUI's :image machinery, ported to the desk. THE HARD RULE this
+        # event wrote: a directive that cannot execute is REFUSED LOUDLY,
+        # never passed through as literal text — success-shaped failure is
+        # the one shape the house must never emit. (A partner receiving
+        # ':image "path"' as literal text has every reason to believe an
+        # image arrived; the model then fills the gap with its nearest
+        # memory. That is not her failure; it is ours if we ever emit it.)
+        from partner_client.directives import parse_input
+        from partner_client.__main__ import _IMAGE_PATH_AUTO_RE, _is_image_extension
+        from partner_client.paths import resolve_path, PathError
+        from pathlib import Path as _P
+
+        parsed = parse_input(text.strip())
+        images: list[bytes] = []
+        for img_path in parsed.image_paths:
+            try:
+                resolved = resolve_path(str(img_path), write=False)
+            except PathError:
+                # Operator typed the path explicitly — that is consent for
+                # this path (matches TUI behavior); resolve directly.
+                try:
+                    resolved = _P(str(img_path)).expanduser().resolve(strict=False)
+                except (OSError, RuntimeError):
+                    return {"ok": False, "error":
+                            f"Image path could not be resolved: {img_path}. "
+                            "Nothing was sent."}
+            if not resolved.is_file():
+                return {"ok": False, "error":
+                        f"Image not found: {resolved}. Nothing was sent — "
+                        "fix the path and send again."}
+            try:
+                images.append(resolved.read_bytes())
+            except OSError as e:
+                return {"ok": False, "error":
+                        f"Could not read image {resolved}: {e}. Nothing was sent."}
+        if parsed.clipboard_image:
+            return {"ok": False, "error":
+                    ":clip is TUI-only for now. Nothing was sent — attach by "
+                    "path with :image, or use the terminal client."}
+
+        send_text = parsed.text.strip() or "(image attached)"
+
+        # Implicit detection (TUI parity): bare image paths in the text
+        # auto-attach when they resolve to real image files. Silent-skip on
+        # failure — mentioning a path is not always intent to attach.
+        if not images:
+            _seen: set = set()
+            for _m in _IMAGE_PATH_AUTO_RE.finditer(send_text):
+                _cand = _m.group("sq") or _m.group("dq") or _m.group("bare")
+                if not _cand:
+                    continue
+                try:
+                    _rp = resolve_path(_cand, write=False)
+                except PathError:
+                    try:
+                        _rp = _P(_cand).expanduser().resolve(strict=False)
+                    except (OSError, RuntimeError):
+                        continue
+                if _rp in _seen or not _rp.is_file() or not _is_image_extension(_rp):
+                    continue
+                try:
+                    images.append(_rp.read_bytes())
+                    _seen.add(_rp)
+                except OSError:
+                    continue
+
         try:
             started = time.perf_counter()
-            self.session.append_user(text.strip())
+            self.session.append_user(send_text, images=images or None)
             _sub = getattr(self.config, "subagent", None)
             _term = getattr(_sub, "term", "") if _sub else ""
             sink = (
