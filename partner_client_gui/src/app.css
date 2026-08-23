@@ -823,7 +823,10 @@ code,
   color: var(--text-primary);
   font-size: var(--text-body);
   line-height: var(--line-height-body);
-  white-space: pre-wrap;
+  /* pre-wrap retired 2026-08-22: the markdown renderer's structure
+     (<p>, <br>, blocks) owns the whitespace now. pre-wrap + block
+     markup double-spaced every paragraph (Willow's catch). */
+  white-space: normal;
 }
 
 /* Streaming indicator — appears while is_streaming=true but no tokens
