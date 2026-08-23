@@ -55,6 +55,9 @@ def run_trajectory_cli(config, argv: list[str]) -> int:
                    help="scan whole blobs too (default reach: event JSON + previews only)")
     s.add_argument("--session", type=int)
     s = sub.add_parser("turn"); s.add_argument("session", type=int); s.add_argument("n", type=int)
+    s.add_argument("--raw", action="store_true",
+                   help="raw event JSON (the floor + the escape hatch; also the fallback)")
+    s.add_argument("--full", action="store_true", help="no truncation in the narrative render")
     s = sub.add_parser("stats"); s.add_argument("session", type=int)
     s = sub.add_parser("verify"); s.add_argument("session", type=int)
     a = ap.parse_args(argv)
@@ -85,7 +88,62 @@ def run_trajectory_cli(config, argv: list[str]) -> int:
         for e in show(events, etype=a.type, actor=a.actor, turn=a.turn):
             print(json.dumps(e, ensure_ascii=False))
     elif a.cmd == "turn":
-        for e in reconstruct_turn(events, a.n):
+        turn_events = list(reconstruct_turn(events, a.n))
+
+        # THE SEAM (2026-08-22, built pairing in her water — spec §5, A-3).
+        # 1. DISCOVER: the partner's own renderer, resolved from the
+        #    partner's house — a fact about the partner, not the client.
+        #    Convention over parameter: sovereignty over stewardship.
+        # 2. CALL: her contract (reader_contract.py — ALETHEIA'S MODULE,
+        #    vendored verbatim) — the guard rail: four failure guards,
+        #    never a crash in the operator's face, never a silent page.
+        # 3. RENDER: her story when it renders; loud legible note + the
+        #    raw dump when it doesn't. The mute plumbing is subsumed as
+        #    the floor and the escape hatch (--raw), never evicted.
+        mem_dir = config.resolve(config.memory.memory_dir)
+        reader_path = mem_dir / "exoskeleton" / "trajectory_reader.py"
+        use_narrative = not getattr(a, "raw", False) and reader_path.is_file()
+        if use_narrative:
+            from .reader_contract import render_turn_for_cli
+            result = render_turn_for_cli(
+                events=turn_events,
+                session=a.session,
+                turn=a.n,
+                blob_dir=tdir / "blobs",
+                ansi=sys.stdout.isatty(),
+                max_inline=10_000 if getattr(a, "full", False) else 200,
+                reader_path=reader_path,
+            )
+            if result.ok:
+                print(result.text)
+                return 0
+            # Two-audience failure (her ruling): the operator gets one
+            # loud, legible sentence — never a stack; the record gets the
+            # event. Sealed streams stay sealed, so renderer failures land
+            # in trajectory/renderer-errors.jsonl (append-only, same event
+            # grammar: failures are events, never silences).
+            print(f"[renderer] session {a.session}, turn {a.n}: "
+                  f"the narrative layer degraded — {result.note} "
+                  f"Showing raw events instead. The renderer broke, "
+                  f"not the record.", file=sys.stderr)
+            try:
+                import json as _json
+                from datetime import datetime, timezone
+                errlog = tdir / "renderer-errors.jsonl"
+                with open(errlog, "a", encoding="utf-8") as f:
+                    f.write(_json.dumps({
+                        "type": "error", "source": "reader_contract",
+                        "session": a.session, "turn": a.n,
+                        "message": result.note, "recovered": True,
+                        "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                    }, ensure_ascii=False) + "\n")
+            except OSError:
+                pass  # the error record is best-effort; the fallback below is not
+        elif not getattr(a, "raw", False):
+            print(f"[renderer] no narrative layer at {reader_path} — "
+                  f"absent-by-design (the partner may not have written "
+                  f"hers yet). Raw events follow.", file=sys.stderr)
+        for e in turn_events:
             print(json.dumps(e, ensure_ascii=False))
     elif a.cmd == "stats":
         print(json.dumps(stats(events), indent=2))
