@@ -521,6 +521,112 @@ class GuiApi:
         except Exception:
             pass
 
+    _ARTIFACT_DISPLAY_CAP = 512 * 1024  # inline read-only view cap (bytes)
+
+    def _load_call_args(self, call_seq: int) -> dict | None:
+        """Recover a tool_call's parsed args from the stream (inline or blob).
+
+        Feeds the chevron's 'bytes-as-written': for write_file the recorded
+        args carry the full content. Returns None when unrecoverable — the
+        chevron then says so honestly instead of guessing.
+        """
+        try:
+            from partner_client.trajectory import read_stream
+
+            tdir = self.memory.sessions_dir.parent / "trajectory"
+            path = tdir / f"session-{self.session.session_num:03d}.jsonl"
+            if not path.exists():
+                return None
+            ev = next(
+                (e for e in read_stream(path)
+                 if e.get("seq") == call_seq and e.get("type") == "tool_call"),
+                None,
+            )
+            if not ev:
+                return None
+            args_field = (ev.get("payload") or {}).get("args")
+            if isinstance(args_field, dict) and str(args_field.get("ref", "")).startswith("sha256:"):
+                sha = args_field["ref"].split(":", 1)[1]
+                blob = tdir / "blobs" / sha[:2] / f"{sha}.txt"
+                raw = blob.read_text(encoding="utf-8", errors="replace")
+            elif isinstance(args_field, str):
+                raw = args_field
+            else:
+                return None
+            parsed = json.loads(raw)
+            return {"tool": (ev.get("payload") or {}).get("name", ""), "args": parsed}
+        except Exception:
+            log.exception("chevron: could not recover call args (seq=%s)", call_seq)
+            return None
+
+    def get_artifact(self, path: str, call_seq: int | None = None) -> dict:
+        """The artifact chevron (design §3.3): current bytes, read-only, plus
+        bytes-as-written recovered from the record when the tool recorded
+        them (write_file does). differs is True/False when both sides exist,
+        None when as-written is honestly unavailable — never guessed.
+
+        Reading through the desk sits inside the same trust boundary as the
+        conversation that already displayed the artifact; paths resolve
+        through the client's existing machinery — no new reach is granted.
+        """
+        if not self.session:
+            return {"ok": False, "error": "Backend not initialized."}
+        try:
+            from partner_client.paths import resolve_path, PathError
+            from pathlib import Path as _P
+
+            try:
+                resolved = resolve_path(str(path), write=False)
+            except PathError:
+                # The path came from the partner's own recorded activity —
+                # display-resolve it directly (read-only, same boundary as
+                # the conversation that already showed it).
+                resolved = _P(str(path)).expanduser().resolve(strict=False)
+
+            current: str | None = None
+            current_missing = False
+            note = ""
+            if resolved.is_file():
+                data = resolved.read_bytes()
+                if len(data) > self._ARTIFACT_DISPLAY_CAP:
+                    current = data[: self._ARTIFACT_DISPLAY_CAP].decode("utf-8", errors="replace")
+                    note = (f"Showing the first {self._ARTIFACT_DISPLAY_CAP // 1024} KB "
+                            f"of {len(data):,} bytes.")
+                else:
+                    try:
+                        current = data.decode("utf-8")
+                    except UnicodeDecodeError:
+                        current = None
+                        note = "Binary or non-UTF-8 content — not displayable inline."
+            else:
+                current_missing = True
+                note = "The file no longer exists at this path."
+
+            as_written: str | None = None
+            recovered = self._load_call_args(call_seq) if call_seq is not None else None
+            if recovered and recovered["tool"] == "write_file":
+                c = recovered["args"].get("content")
+                if isinstance(c, str):
+                    as_written = c
+
+            differs: bool | None = None
+            if as_written is not None and current is not None and not note.startswith("Showing"):
+                differs = current != as_written
+
+            return {
+                "ok": True,
+                "path": str(resolved),
+                "current": current,
+                "current_missing": current_missing,
+                "as_written": as_written,
+                "differs": differs,
+                "note": note,
+            }
+        except Exception:
+            log.exception("get_artifact failed")
+            return {"ok": False,
+                    "error": "The file could not be read for display — the record itself is unaffected."}
+
     def get_trajectory(self, from_seq: int = 0) -> dict:
         """Catch-up read for the Seat (design §2.3): the current session's
         stream from disk, from a seq cursor. A desk opened mid-session (or a

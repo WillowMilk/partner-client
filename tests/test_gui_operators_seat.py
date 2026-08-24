@@ -154,3 +154,100 @@ def test_uninitialized_backend_answers_plainly(tmp_path):
     a.session = None
     r = a.get_trajectory()
     assert r["ok"] is False and r["events"] == []
+
+
+# ── the artifact chevron (increment 4, design §3.3) ────────────────────
+
+def _api_with_stream(tmp_path, events):
+    a = _bare_api(tmp_path)
+    _write_stream(tmp_path, 3, events)
+    return a
+
+
+def test_chevron_current_and_as_written_differ(tmp_path):
+    """write_file's recorded args feed bytes-as-written; differs is honest."""
+    target = tmp_path / "journal.md"
+    target.write_text("edited later by hand")
+    args = json.dumps({"filename": str(target), "content": "as first written"})
+    a = _api_with_stream(tmp_path, [
+        {"seq": 5, "type": "tool_call",
+         "payload": {"name": "write_file", "args": args}},
+    ])
+    r = a.get_artifact(str(target), call_seq=5)
+    assert r["ok"] and r["current"] == "edited later by hand"
+    assert r["as_written"] == "as first written"
+    assert r["differs"] is True
+
+
+def test_chevron_identical_bytes_do_not_cry_wolf(tmp_path):
+    target = tmp_path / "note.md"
+    target.write_text("same bytes")
+    args = json.dumps({"filename": str(target), "content": "same bytes"})
+    a = _api_with_stream(tmp_path, [
+        {"seq": 2, "type": "tool_call",
+         "payload": {"name": "write_file", "args": args}},
+    ])
+    r = a.get_artifact(str(target), call_seq=2)
+    assert r["differs"] is False
+
+
+def test_chevron_as_written_unavailable_is_none_never_guessed(tmp_path):
+    """Non-write tools: differs stays None — honestly unknown, not False."""
+    target = tmp_path / "read.md"
+    target.write_text("content")
+    a = _api_with_stream(tmp_path, [
+        {"seq": 1, "type": "tool_call",
+         "payload": {"name": "read_file", "args": json.dumps({"filename": str(target)})}},
+    ])
+    r = a.get_artifact(str(target), call_seq=1)
+    assert r["ok"] and r["as_written"] is None and r["differs"] is None
+
+
+def test_chevron_blob_args_recovered(tmp_path):
+    """Large write_file args live in a blob; as-written comes back whole."""
+    import hashlib
+    target = tmp_path / "big.md"
+    big_content = "x" * 10000
+    target.write_text(big_content)
+    args_raw = json.dumps({"filename": str(target), "content": big_content})
+    sha = hashlib.sha256(args_raw.encode()).hexdigest()
+    blob_dir = tmp_path / "Memory" / "trajectory" / "blobs" / sha[:2]
+    blob_dir.mkdir(parents=True)
+    (blob_dir / f"{sha}.txt").write_text(args_raw)
+    a = _api_with_stream(tmp_path, [
+        {"seq": 7, "type": "tool_call",
+         "payload": {"name": "write_file",
+                     "args": {"ref": f"sha256:{sha}", "bytes": len(args_raw),
+                              "preview": args_raw[:200]}}},
+    ])
+    r = a.get_artifact(str(target), call_seq=7)
+    assert r["as_written"] == big_content and r["differs"] is False
+
+
+def test_chevron_missing_file_shows_as_written_from_the_record(tmp_path):
+    """Deleted since the turn: the record still shows what was written."""
+    gone = tmp_path / "gone.md"
+    args = json.dumps({"filename": str(gone), "content": "preserved in the record"})
+    a = _api_with_stream(tmp_path, [
+        {"seq": 4, "type": "tool_call",
+         "payload": {"name": "write_file", "args": args}},
+    ])
+    r = a.get_artifact(str(gone), call_seq=4)
+    assert r["current_missing"] is True and r["current"] is None
+    assert r["as_written"] == "preserved in the record"
+
+
+def test_chevron_binary_file_is_honest(tmp_path):
+    blob = tmp_path / "img.png"
+    blob.write_bytes(b"\x89PNG\r\n\x1a\n\x00\xff\xfe binary")
+    a = _bare_api(tmp_path)
+    r = a.get_artifact(str(blob))
+    assert r["ok"] and r["current"] is None
+    assert "not displayable" in r["note"]
+
+
+def test_chevron_failure_is_a_sentence(tmp_path):
+    a = _bare_api(tmp_path)
+    a.session = None
+    r = a.get_artifact("/anything")
+    assert r["ok"] is False and "\n" not in r["error"]

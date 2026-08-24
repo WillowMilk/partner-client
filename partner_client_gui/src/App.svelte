@@ -330,6 +330,46 @@
     return true;  // normal + verbose both show the hands
   }
 
+  // The artifact chevron (design §3.3): expandable read-only view of the
+  // file an event touched — current bytes, plus bytes-as-written from the
+  // record when the tool recorded them. The desk reads; it never holds
+  // the pen. Chevrons stay live in the transcript after the turn ends.
+  async function toggle_chevron(i) {
+    const msg = messages[i];
+    if (!msg || msg.role !== 'feedrow' || !msg.row.artifact) return;
+    if (msg.chevron && msg.chevron.open) {
+      msg.chevron = { ...msg.chevron, open: false };
+      messages = [...messages];
+      return;
+    }
+    if (msg.chevron && msg.chevron.data) {
+      msg.chevron = { ...msg.chevron, open: true };
+      messages = [...messages];
+      return;
+    }
+    msg.chevron = { open: true, loading: true, data: null, error: '', show_as_written: false };
+    messages = [...messages];
+    try {
+      const r = await window.pywebview.api.get_artifact(
+        msg.row.artifact.path, msg.row.call_seq ?? null);
+      msg.chevron = r.ok
+        ? { open: true, loading: false, data: r, error: '', show_as_written: false }
+        : { open: true, loading: false, data: null, error: r.error || 'Could not read the file.', show_as_written: false };
+    } catch (e) {
+      msg.chevron = { open: true, loading: false, data: null,
+                      error: 'The file could not be read for display — the record itself is unaffected.',
+                      show_as_written: false };
+    }
+    messages = [...messages];
+  }
+
+  function chevron_flip_view(i) {
+    const msg = messages[i];
+    if (!msg || !msg.chevron) return;
+    msg.chevron = { ...msg.chevron, show_as_written: !msg.chevron.show_as_written };
+    messages = [...messages];
+  }
+
   async function _seat_backfill(api) {
     // A desk opened mid-session: seed the dedupe set and, if a turn is
     // open on the stream, resume the presence line at its TRUE elapsed —
@@ -1222,7 +1262,46 @@
               {#if msg.row.gated && !msg.row.gate}<span class="feed-gated" title="This call rang a consent gate">🔔</span>{/if}
               {#if msg.row.elapsed_ms != null}<span class="feed-elapsed">· {_fmt_row_elapsed(msg.row.elapsed_ms)}</span>{/if}
               {#if !msg.row.done}<span class="feed-unresolved" title="No result was recorded for this call">· unresolved</span>{/if}
+              {#if msg.row.artifact}
+                <button class="chevron-btn" title="Open the file inline, read-only"
+                        onclick={() => toggle_chevron(i)}>
+                  {msg.chevron?.open ? '▾' : '▸'}
+                </button>
+              {/if}
             </div>
+            {#if msg.chevron?.open}
+              <div class="artifact-view">
+                {#if msg.chevron.loading}
+                  <div class="artifact-note">reading…</div>
+                {:else if msg.chevron.error}
+                  <div class="artifact-note">{msg.chevron.error}</div>
+                {:else if msg.chevron.data}
+                  <div class="artifact-head">
+                    <span class="artifact-path">{msg.chevron.data.path}</span>
+                    <span class="artifact-flags">
+                      {#if msg.chevron.data.differs === true}
+                        <span class="artifact-changed" title="The file's current bytes differ from what was written in this turn">changed since written</span>
+                        <button class="artifact-flip" onclick={() => chevron_flip_view(i)}>
+                          {msg.chevron.show_as_written ? 'view current' : 'view as-written'}
+                        </button>
+                      {/if}
+                      <span class="artifact-ro" title="The desk reads; it never holds the pen">read-only</span>
+                    </span>
+                  </div>
+                  {#if msg.chevron.data.note}
+                    <div class="artifact-note">{msg.chevron.data.note}</div>
+                  {/if}
+                  {#if msg.chevron.data.current_missing && msg.chevron.data.as_written != null}
+                    <pre class="artifact-pre">{msg.chevron.data.as_written}</pre>
+                    <div class="artifact-note">Showing bytes-as-written, recovered from the record.</div>
+                  {:else if msg.chevron.show_as_written && msg.chevron.data.as_written != null}
+                    <pre class="artifact-pre">{msg.chevron.data.as_written}</pre>
+                  {:else if msg.chevron.data.current != null}
+                    <pre class="artifact-pre">{msg.chevron.data.current}</pre>
+                  {/if}
+                {/if}
+              </div>
+            {/if}
           {/if}
         {:else if msg.role === 'turnstamp'}
           {#if seat_row_visible(msg)}

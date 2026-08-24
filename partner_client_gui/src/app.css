@@ -1971,3 +1971,70 @@ button.sidebar-link-button.active { background: var(--bg-hover); border-radius: 
 @media (prefers-reduced-motion: reduce) {
   .presence-mark { animation: none; opacity: 0.9; }
 }
+
+/* ── The artifact chevron (Phase 1 increment 4) ──
+ * Read-only inline view: the operator reads, copies, comments — without
+ * leaving the desk. The desk reads; it never holds the pen. */
+.chevron-btn {
+  flex: none;
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--accent-operator);
+  font-size: 0.9em;
+  padding: 0 0.2em;
+  line-height: 1;
+}
+.chevron-btn:hover { color: var(--accent-operator-hover); }
+.artifact-view {
+  margin: 0.2rem 0 0.6rem var(--space-4);
+  border-left: 2.5px solid color-mix(in srgb, var(--accent-operator) 35%, transparent);
+  padding: 0.4em 0.8em;
+  background: color-mix(in srgb, var(--accent-operator) 4%, transparent);
+  border-radius: 4px;
+  font-size: var(--text-meta);
+}
+.artifact-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.8em;
+  margin-bottom: 0.3em;
+}
+.artifact-path {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.artifact-flags { display: flex; gap: 0.6em; align-items: baseline; flex: none; }
+.artifact-changed {
+  color: #b5651d;
+  font-style: italic;
+}
+.artifact-flip {
+  background: none;
+  border: 1px solid color-mix(in srgb, var(--accent-operator) 40%, transparent);
+  border-radius: 3px;
+  cursor: pointer;
+  color: var(--accent-operator);
+  font-size: 0.85em;
+  padding: 0.05em 0.5em;
+}
+.artifact-ro { opacity: 0.6; font-style: italic; }
+.artifact-note { color: var(--text-muted); font-style: italic; margin: 0.2em 0; }
+.artifact-pre {
+  max-height: 24em;
+  overflow: auto;
+  margin: 0.3em 0;
+  padding: 0.5em 0.7em;
+  background: color-mix(in srgb, var(--text-muted) 6%, transparent);
+  border-radius: 4px;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.92em;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+  user-select: text;
+}
