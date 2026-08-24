@@ -1093,7 +1093,25 @@ class GuiApi:
                 "duration_ms": elapsed_ms,
             }
         except Exception as e:
-            return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+            # Sentence-never-a-stack (her ruling — desk law, Phase 1 §5):
+            # the operator gets one plain line; the full failure goes to the
+            # log AND to the record as an error event (failures are events,
+            # never silences — spec §3). Raw payloads (ResponseError JSON,
+            # tracebacks) never reach the conversation pane.
+            log.exception("send_message failed")
+            _tj = getattr(self.session, "trajectory", None) if self.session else None
+            if _tj is not None:
+                _tj.emit("error", {
+                    "source": "gui.send_message",
+                    "message": f"{type(e).__name__}: {e}"[:2000],
+                    "recovered": False,
+                })
+            return {
+                "ok": False,
+                "error": ("The turn failed before completing "
+                          f"({type(e).__name__}). The conversation and the record "
+                          "are unaffected; the details are in the log."),
+            }
 
     # ============================================================
     # JS-callable: substrate switcher (Phase 2b-1)

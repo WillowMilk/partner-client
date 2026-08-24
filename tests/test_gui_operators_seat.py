@@ -287,3 +287,33 @@ def test_dial_survives_corrupt_sidecar(tmp_path):
     assert a.get_seat_dial() == {"ok": True, "dial": "normal"}
     assert a.set_seat_dial("verbose")["ok"]      # rewrites cleanly
     assert a.get_seat_dial()["dial"] == "verbose"
+
+
+# ── desk error legibility (increment 6a, design §5 — her ruling) ───────
+
+def test_send_message_failure_is_a_sentence_and_a_stream_event(tmp_path):
+    """The operator gets one plain line; the record gets the error event."""
+    from partner_client.trajectory import TrajectoryWriter, read_stream
+
+    a = _bare_api(tmp_path)
+    w = TrajectoryWriter(tmp_path / "tj", session_num=3)
+
+    class _ExplodingSession:
+        closed = False
+        trajectory = w
+        session_num = 3
+        def append_user(self, *args, **kw):
+            raise RuntimeError('{"error":{"code":500,"raw":"ResponseError JSON blob"}}')
+
+    a.session = _ExplodingSession()
+    a.client = types.SimpleNamespace()
+    a.config = types.SimpleNamespace(subagent=None)
+    r = a.send_message("hello")
+    assert r["ok"] is False
+    assert "ResponseError JSON blob" not in r["error"]   # raw payload never reaches the pane
+    assert "\n" not in r["error"] and "Traceback" not in r["error"]
+    assert "RuntimeError" in r["error"]                  # the class, named plainly
+    errs = [e for e in read_stream(w.path) if e.get("type") == "error"]
+    assert len(errs) == 1                                # failures are events, never silences
+    assert errs[0]["payload"]["source"] == "gui.send_message"
+    assert "ResponseError" in errs[0]["payload"]["message"]  # the record keeps the detail
