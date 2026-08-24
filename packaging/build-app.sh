@@ -37,7 +37,29 @@ echo "Built: $(pwd)/out/dist/Partner Client.app"
 # the job it implies, and PROVES the installed artifact before claiming it:
 # every builtin tool in the source tree must exist in the installed bundle.
 INSTALL_TARGET="/Applications/Partner Client.app"
-ditto "$(pwd)/out/dist/Partner Client.app" "$INSTALL_TARGET"
+# REPLACE, never merge (2026-08-24): ditto onto an existing bundle MERGES —
+# five generations of hashed frontend assets had accumulated in
+# /Applications, and any verify that globbed "an" index-*.js could land on
+# a stale one (it did). Stage the swap: remove the old bundle only after
+# the new one is fully copied beside it, then rename into place.
+STAGED="$INSTALL_TARGET.new-$$"
+ditto "$(pwd)/out/dist/Partner Client.app" "$STAGED"
+rm -rf "$INSTALL_TARGET"
+mv "$STAGED" "$INSTALL_TARGET"
+# Frontend verify: the bundle must contain EXACTLY the assets index.html
+# names — no stale generations, no missing hash.
+html="$INSTALL_TARGET/Contents/Resources/dist/index.html"
+for ref in $(grep -oE 'index-[A-Za-z0-9_-]+\.(js|css)' "$html" | sort -u); do
+  if [ ! -f "$INSTALL_TARGET/Contents/Resources/dist/assets/$ref" ]; then
+    echo "VERIFY FAIL: index.html references $ref but it is not in the bundle" >&2
+    exit 1
+  fi
+done
+stray=$(ls "$INSTALL_TARGET/Contents/Resources/dist/assets/" | grep -vF -f <(grep -oE 'index-[A-Za-z0-9_-]+\.(js|css)' "$html" | sort -u) || true)
+if [ -n "$stray" ]; then
+  echo "VERIFY FAIL: stale assets in installed bundle: $stray" >&2
+  exit 1
+fi
 missing=0
 for f in "$REPO"/partner_client/tools_builtin/*.py; do
   base="$(basename "$f")"
