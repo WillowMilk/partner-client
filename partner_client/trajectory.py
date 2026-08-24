@@ -53,6 +53,14 @@ class TrajectoryWriter:
 
     A writer that cannot write logs loudly once per failure-burst and keeps
     returning None. The partner's work is never gated on the record (§4.2).
+
+    Phase 1 (the Operator's Seat): an optional `observer` receives every
+    envelope AFTER it is successfully appended to disk — the Seat renders
+    the stream, never wishes. The observer is fail-open squared: an observer
+    exception is caught here, never raises into the emit path, never marks
+    the writer broken, and logs once per failure-burst. If recording itself
+    degrades, the observer receives one synthetic `recording_degraded`
+    notice so the desk can show an honest banner instead of a silent gap.
     """
 
     def __init__(
@@ -63,6 +71,7 @@ class TrajectoryWriter:
         substrate: str = "",
         blob_threshold: int = 8192,
         enabled: bool = True,
+        observer: Any = None,
     ):
         self.enabled = enabled
         self._broken = False
@@ -70,6 +79,8 @@ class TrajectoryWriter:
         self._turn = 0
         self._turn_open = False
         self._turn_started = 0.0
+        self._observer = observer if callable(observer) else None
+        self._observer_fail_logged = False
         self.session_num = session_num
         self.blob_threshold = max(1024, int(blob_threshold))
         try:
@@ -110,6 +121,53 @@ class TrajectoryWriter:
                 e,
                 self.session_num,
             )
+            # Tell the desk honestly: the feed goes dark WITH a named cause,
+            # never silently (Phase 1 design §2.2). Synthetic — not appended
+            # to the stream, which is by definition unwritable right now.
+            self._notify(
+                {
+                    "type": "recording_degraded",
+                    "ts": _now_iso(),
+                    "session": self.session_num,
+                    "payload": {"where": where, "error": str(e)},
+                }
+            )
+
+    # ── the observer (Phase 1: the Operator's Seat) ────────────────────
+    def set_observer(self, observer: Any) -> None:
+        """Attach (or replace) the live-delivery observer. Late attachment
+        is expected — the GUI wires itself after the session exists. If the
+        writer is already broken, the new observer learns that immediately
+        rather than waiting in front of a silently dark feed.
+        """
+        self._observer = observer if callable(observer) else None
+        self._observer_fail_logged = False
+        if self._broken and self._observer is not None:
+            self._notify(
+                {
+                    "type": "recording_degraded",
+                    "ts": _now_iso(),
+                    "session": self.session_num,
+                    "payload": {"where": "set_observer", "error": "recording already degraded"},
+                }
+            )
+
+    def _notify(self, ev: dict[str, Any]) -> None:
+        """Fail-open squared: delivery failure never touches recording."""
+        if self._observer is None:
+            return
+        try:
+            self._observer(ev)
+            self._observer_fail_logged = False
+        except Exception as e:
+            if not self._observer_fail_logged:
+                self._observer_fail_logged = True
+                log.error(
+                    "TRAJECTORY OBSERVER FAILED (%s) — recording continues "
+                    "unaffected; live delivery to the desk is degraded until "
+                    "the observer recovers.",
+                    e,
+                )
 
     # ── plumbing ───────────────────────────────────────────────────────
     @staticmethod
@@ -144,6 +202,9 @@ class TrajectoryWriter:
             f.flush()
         seq = self._seq
         self._seq += 1
+        # Only APPENDED events are observed — the Seat renders the stream,
+        # not wishes (Phase 1 design §2.2). Notify strictly after the write.
+        self._notify(ev)
         return seq
 
     def _offload(self, text: str) -> dict[str, Any]:

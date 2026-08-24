@@ -330,6 +330,24 @@ class Session:
         self.save_current()
         return "fresh"
 
+    def set_trajectory_observer(self, observer: Any) -> None:
+        """Wire a live-delivery observer for the Operator's Seat (Phase 1).
+
+        Works both before and after the writer exists: if the writer is
+        already up, the observer attaches now; otherwise it rides along when
+        start_trajectory constructs it. Fail-open — never raises.
+        """
+        try:
+            self._trajectory_observer = observer
+            if self.trajectory is not None:
+                self.trajectory.set_observer(observer)
+        except Exception:
+            import logging
+            logging.getLogger("partner_client.trajectory").exception(
+                "set_trajectory_observer failed — live delivery unavailable; "
+                "recording and the session continue unaffected."
+            )
+
     def start_trajectory(self) -> None:
         """Create this session's trajectory writer (Exoskeleton Phase 0).
 
@@ -351,6 +369,7 @@ class Session:
                 partner=partner,
                 substrate=model_name,
                 blob_threshold=getattr(tcfg, "blob_threshold", 8192) if tcfg else 8192,
+                observer=getattr(self, "_trajectory_observer", None),
             )
             self.trajectory.lifecycle("wake", session=self.session_num)
         except Exception as e:
