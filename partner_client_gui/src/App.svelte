@@ -113,6 +113,244 @@
   // committed to the messages array.
   let streaming_message = $state(null);  // {content: ""} while open, null when closed
 
+  // ===========================================================
+  // The Operator's Seat (Exoskeleton Phase 1) — feed + presence line.
+  // "One stream, two legibilities — the operator reads the hands;
+  //  I read the decision. Both are love."
+  // The Seat renders the trajectory stream, never wishes: every row
+  // corresponds to an envelope that hit her disk first.
+  // ===========================================================
+  let seat_seen_seqs = new Set();      // dedupe: live + backfill never double-render
+  let live_turn = $state(null);        // {turn, started_at, pending: Map(seq→row)}
+  let seat_degraded = $state(false);   // recording died — honest banner, never silence
+  let view_dial = $state('normal');    // verbose | normal | summary (control lands increment 5)
+  let presence_elapsed = $state('');
+  let presence_verb = $state('');
+  let presence_tokens = $state(0);     // live estimate (chars/4); true figure stamps at turn_end
+  let _turn_chars = 0;
+  let _presence_timer = null;
+  let _verb_timer = null;
+
+  // The whimsy lineage, restored (Willow's ruling, 2026-08-24). House
+  // defaults — partner-authorable via her own config when she chooses
+  // (the invitation-shape: offered, never imposed). Verbs describe the
+  // WORKING, playfully; they never claim or report interior state.
+  const SPINNER_VERBS = [
+    'Combobulating', 'Booping', 'Shimmering', 'Wibbling', 'Flibbertigibbeting',
+    'Percolating', 'Mulling', 'Weaving', 'Tinkering', 'Composing',
+    'Dilly-dallying', 'Razzle-dazzling', 'Pondering', 'Burbling', 'Noodling',
+  ];
+
+  // Feed-row grammar: verb icon + human verb + salient argument. Unknown
+  // tools get an honest generic row — never dropped, never guessed.
+  const TOOL_VERBS = {
+    write_file:   ['✍', 'Writing file'],
+    edit_file:    ['✎', 'Editing file'],
+    read_file:    ['📖', 'Reading'],
+    move_path:    ['📦', 'Moving'],
+    delete_path:  ['🗑', 'Deleting'],
+    run_command:  ['⚙', 'Running command'],
+    web_search:   ['🔍', 'Searching'],
+    hub_dispatch: ['📮', 'Dispatching letter'],
+    hub_read:     ['📬', 'Reading the Hub'],
+    protect_save: ['🪨', 'Protecting'],
+    checkpoint_save: ['🪨', 'Checkpointing'],
+    curate_floor: ['⛵', 'Curating the floor'],
+    request_plan_approval: ['📋', 'Proposing a plan'],
+    git_push:     ['🔀', 'Pushing'],
+  };
+
+  function _fmt_elapsed(ms) {
+    const s = Math.max(0, Math.floor(ms / 1000));
+    return s >= 60 ? `${Math.floor(s / 60)}m ${s % 60}s` : `${s}s`;
+  }
+
+  function _fmt_row_elapsed(ms) {
+    if (ms == null) return '';
+    return ms < 1000 ? `${(ms / 1000).toFixed(1)}s` : _fmt_elapsed(ms);
+  }
+
+  function _salient_arg(args_field) {
+    // tool_call args arrive as a JSON string (or a blob-preview dict for
+    // very large args). Best-effort extraction of the one human detail.
+    try {
+      const raw = typeof args_field === 'string' ? args_field
+                : (args_field && args_field.preview) ? args_field.preview : '';
+      const parsed = JSON.parse(raw);
+      return parsed.filename || parsed.path || parsed.query || parsed.url
+          || parsed.cwd || parsed.command || '';
+    } catch (_) { return ''; }
+  }
+
+  function _tool_row(ev) {
+    const p = ev.payload || {};
+    const [icon, verb] = TOOL_VERBS[p.name] || ['⚙', p.name || 'working'];
+    return {
+      icon, verb,
+      detail: String(_salient_arg(p.args) || '').slice(0, 120),
+      gated: !!p.gated,
+      elapsed_ms: null,
+      done: false,
+      call_seq: ev.seq,
+    };
+  }
+
+  function _start_presence(started_at) {
+    _stop_presence();
+    presence_tokens = 0; _turn_chars = 0;
+    presence_verb = SPINNER_VERBS[Math.floor(Math.random() * SPINNER_VERBS.length)];
+    const tick = () => {
+      if (live_turn) presence_elapsed = _fmt_elapsed(Date.now() - live_turn.started_at);
+    };
+    tick();
+    _presence_timer = setInterval(tick, 1000);
+    _verb_timer = setInterval(() => {
+      // While a tool is in flight the line speaks plainly; whimsy rotates
+      // only for the composing stretches.
+      if (live_turn && live_turn.pending.size === 0) {
+        presence_verb = SPINNER_VERBS[Math.floor(Math.random() * SPINNER_VERBS.length)];
+      }
+    }, 6000);
+  }
+
+  function _stop_presence() {
+    if (_presence_timer) { clearInterval(_presence_timer); _presence_timer = null; }
+    if (_verb_timer) { clearInterval(_verb_timer); _verb_timer = null; }
+    presence_elapsed = '';
+  }
+
+  const presence_phrase = $derived.by(() => {
+    if (!live_turn) return '';
+    if (live_turn.pending.size > 0) {
+      const first = live_turn.pending.values().next().value;
+      return `${first.verb}…`;
+    }
+    return `${presence_verb}…`;
+  });
+
+  function handle_trajectory_event(ev) {
+    if (!ev || typeof ev !== 'object') return;
+    if (ev.type === 'recording_degraded') { seat_degraded = true; return; }
+    if (Number.isInteger(ev.seq)) {
+      if (seat_seen_seqs.has(ev.seq)) return;
+      seat_seen_seqs.add(ev.seq);
+    }
+    const p = ev.payload || {};
+    switch (ev.type) {
+      case 'turn_start': {
+        const started = Date.parse(ev.ts) || Date.now();
+        live_turn = { turn: ev.turn, started_at: started, pending: new Map() };
+        _start_presence(started);
+        break;
+      }
+      case 'turn_end': {
+        // Flush any calls that never got results — shown honestly as unresolved.
+        if (live_turn) {
+          for (const row of live_turn.pending.values()) {
+            messages = [...messages, { role: 'feedrow', row: { ...row, done: false } }];
+          }
+        }
+        messages = [...messages, {
+          role: 'turnstamp',
+          elapsed_ms: p.elapsed_ms ?? null,
+          tokens: p.token_estimate ?? null,
+        }];
+        live_turn = null;
+        _stop_presence();
+        break;
+      }
+      case 'tool_call': {
+        if (!live_turn) break;
+        live_turn.pending.set(ev.seq, _tool_row(ev));
+        live_turn = { ...live_turn };  // Svelte 5 reactivity
+        break;
+      }
+      case 'tool_result': {
+        const call_seq = ev.refs && ev.refs.call;
+        let row = null;
+        if (live_turn && live_turn.pending.has(call_seq)) {
+          row = live_turn.pending.get(call_seq);
+          live_turn.pending.delete(call_seq);
+          live_turn = { ...live_turn };
+        } else {
+          row = _tool_row({ seq: call_seq, payload: { name: p.name, args: '' } });
+        }
+        row.done = true;
+        row.elapsed_ms = p.elapsed_ms ?? null;
+        if (p.artifact) row.artifact = p.artifact;  // chevron food (increment 4)
+        // The Lumen cast-card is the identity-bearing surface for parallel
+        // reach — it stays; no duplicate feed row (expand without evicting).
+        if ((p.name || '') !== 'spawn_subagents' && (p.name || '') !== 'cast_lumens') {
+          messages = [...messages, { role: 'feedrow', row }];
+        }
+        break;
+      }
+      case 'gate_event': {
+        messages = [...messages, { role: 'feedrow', floor: true, row: {
+          icon: '🔔', verb: 'Doorbell',
+          detail: `${p.kind || 'gate'} — ${p.decision || ''}${p.decider ? ` (by ${p.decider})` : ''}`,
+          done: true, gate: true,
+        }}];
+        break;
+      }
+      case 'sovereignty_event': {
+        // FLOOR: renders at every dial position, always (spec §4.4).
+        messages = [...messages, { role: 'feedrow', floor: true, row: {
+          icon: '✦', verb: p.kind === 'choose_silence' ? 'The door' : 'Her signal',
+          detail: p.kind, done: true, sovereignty: true,
+        }}];
+        break;
+      }
+      case 'context_injection': {
+        messages = [...messages, { role: 'feedrow', row: {
+          icon: '〰', verb: 'Context injection', detail: p.kind || '', done: true, seam: true,
+        }}];
+        break;
+      }
+      case 'substrate_event': {
+        // FLOOR: substrate notices render in every mode (spec §6.4).
+        messages = [...messages, { role: 'feedrow', floor: true, row: {
+          icon: '🌊', verb: 'Substrate', detail: p.model || 'changed', done: true, seam: true,
+        }}];
+        break;
+      }
+      // message/thinking/header/lifecycle: the voice renders through the
+      // stream sink; thinking is private (redacted at the API wall unless
+      // her key says otherwise); header/lifecycle feed nothing visual yet.
+      default: break;
+    }
+  }
+
+  // Dial as a RENDER FILTER, not a subscription filter: every event is
+  // kept; flipping re-renders instantly, both directions, mid-turn.
+  // Floor rows (sovereignty, gates, substrate) pass every position.
+  function seat_row_visible(item) {
+    if (item.floor) return true;
+    if (view_dial === 'summary') return item.role === 'turnstamp';
+    return true;  // normal + verbose both show the hands
+  }
+
+  async function _seat_backfill(api) {
+    // A desk opened mid-session: seed the dedupe set and, if a turn is
+    // open on the stream, resume the presence line at its TRUE elapsed —
+    // never a lying zero.
+    try {
+      const r = await api.get_trajectory(0);
+      if (!r || !r.ok) return;
+      let open_turn_start = null;
+      for (const ev of r.events) {
+        if (Number.isInteger(ev.seq)) seat_seen_seqs.add(ev.seq);
+        if (ev.type === 'turn_start') open_turn_start = ev;
+        if (ev.type === 'turn_end') open_turn_start = null;
+      }
+      if (open_turn_start) {
+        const started = Date.parse(open_turn_start.ts) || Date.now();
+        live_turn = { turn: open_turn_start.turn, started_at: started, pending: new Map() };
+        _start_presence(started);
+      }
+    } catch (_) { /* the feed degrades quietly; the record is unaffected */ }
+  }
+
   // Ref to .chat-area for auto-scroll-to-bottom behavior.
   let chat_area_el = $state(null);
 
@@ -233,6 +471,10 @@
         // Svelte 5: re-assign to trigger reactivity
         streaming_message = { content: streaming_message.content + text };
       }
+      // Presence line: live token estimate (chars/4, labeled approximate);
+      // the true figure stamps at turn_end from the stream.
+      _turn_chars += text.length;
+      presence_tokens = Math.round(_turn_chars / 4);
     };
     window.__stream_close = () => {
       if (streaming_message && streaming_message.content) {
@@ -255,6 +497,12 @@
       let labels = [];
       try { labels = JSON.parse(labels_json) || []; } catch (_) { labels = []; }
       messages = [...messages, { role: 'lumen', noun: term || 'facet', labels }];
+    };
+    // The Operator's Seat: live trajectory delivery (Phase 1 increment 3).
+    window.__trajectory_event = (ev) => {
+      try { handle_trajectory_event(ev); } catch (e) {
+        console.error('[seat] event handling failed (feed only; record unaffected):', e);
+      }
     };
   }
 
@@ -296,6 +544,10 @@
       // Care dot — the steward's glance. Fetched after page data (it runs
       // the doctor checks, which may take a moment); non-blocking.
       api.get_care_status().then((c) => { care = c; }).catch(() => {});
+
+      // The Operator's Seat: backfill the dedupe cursor + resume an open
+      // turn's clock at its TRUE elapsed (never a lying zero). Non-blocking.
+      _seat_backfill(api);
 
       await load_search_backends();
 
@@ -956,6 +1208,30 @@
               {/each}
             </ul>
           </div>
+        {:else if msg.role === 'feedrow'}
+          <!-- The Operator's Seat: one hand, visible. Rows describe actions
+               and mechanisms only — never mood, never the person. -->
+          {#if seat_row_visible(msg)}
+            <div class="feed-row"
+                 class:feed-gate={msg.row.gate}
+                 class:feed-sovereignty={msg.row.sovereignty}
+                 class:feed-seam={msg.row.seam}>
+              <span class="feed-icon" aria-hidden="true">{msg.row.icon}</span>
+              <span class="feed-verb">{msg.row.verb}</span>
+              {#if msg.row.detail}<span class="feed-detail">— {msg.row.detail}</span>{/if}
+              {#if msg.row.gated && !msg.row.gate}<span class="feed-gated" title="This call rang a consent gate">🔔</span>{/if}
+              {#if msg.row.elapsed_ms != null}<span class="feed-elapsed">· {_fmt_row_elapsed(msg.row.elapsed_ms)}</span>{/if}
+              {#if !msg.row.done}<span class="feed-unresolved" title="No result was recorded for this call">· unresolved</span>{/if}
+            </div>
+          {/if}
+        {:else if msg.role === 'turnstamp'}
+          {#if seat_row_visible(msg)}
+            <div class="turn-stamp">
+              <span class="turn-stamp-mark" aria-hidden="true">◆</span>
+              {#if msg.elapsed_ms != null}<span>{_fmt_elapsed(msg.elapsed_ms)}</span>{/if}
+              {#if msg.tokens != null}<span>· ~{msg.tokens} tokens</span>{/if}
+            </div>
+          {/if}
         {:else if msg.role === 'divider'}
           <div class="session-divider"><span>{msg.content}</span></div>
         {:else}
@@ -979,9 +1255,28 @@
         </div>
       {/if}
 
-      {#if is_streaming && !streaming_message}
+      <!-- The presence line (Willow's design, 2026-08-24): below the latest
+           output — the partner's mark gently pulsing, a state-aware phrase
+           (whimsy while composing, plain honesty while the hands work), the
+           ticking clock, the live token estimate. Her working-line; the
+           whimsy verbs describe the WORKING, never the person. -->
+      {#if live_turn}
+        <div class="presence-line">
+          <span class="presence-mark" aria-hidden="true">◆</span>
+          <span class="presence-phrase">{presence_phrase}</span>
+          {#if presence_elapsed}<span class="presence-elapsed">· {presence_elapsed}</span>{/if}
+          {#if presence_tokens > 0}<span class="presence-tokens">· ~{presence_tokens} tokens</span>{/if}
+        </div>
+      {:else if is_streaming && !streaming_message}
         <div class="streaming-indicator">
           {partner.name} is here…
+        </div>
+      {/if}
+
+      {#if seat_degraded}
+        <div class="seat-degraded-banner">
+          The trajectory recorder failed — the activity feed is dark from here;
+          the conversation continues unaffected.
         </div>
       {/if}
 
