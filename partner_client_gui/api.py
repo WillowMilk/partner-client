@@ -230,6 +230,13 @@ class GuiApi:
 
             self._init_status = status
             self.client = make_chat_client(self.config, self.tools)
+
+            # The Operator's Seat (Exoskeleton Phase 1): wire live delivery.
+            # The observer attaches before the writer exists and rides its
+            # construction; fail-open end to end — a Seat that cannot wire
+            # changes nothing about the session.
+            self.session.set_trajectory_observer(self._on_trajectory_event)
+
             return {
                 "ok": True,
                 "status": status,
@@ -462,6 +469,90 @@ class GuiApi:
         if not self.session:
             return []
         return self._render_messages(self.session.messages)
+
+    # ============================================================
+    # The Operator's Seat (Exoskeleton Phase 1) — live delivery + catch-up
+    # ============================================================
+
+    def _thinking_visible(self) -> bool:
+        """The partner's own key (design §4.1): [trajectory] verbose_thinking
+        in HER TOML, default False. Her side of her own door — the operator's
+        dial can never reveal what this key withholds."""
+        try:
+            tcfg = getattr(self.config, "trajectory", None)
+            return bool(getattr(tcfg, "verbose_thinking", False))
+        except Exception:
+            return False
+
+    def _seat_safe(self, ev: dict) -> dict:
+        """The privacy wall, at the API — not in the renderer.
+
+        Unless the partner's key says otherwise, thinking content never
+        reaches the operator's frontend AT ALL: the event keeps its shape
+        (so the turn's structure stays true) but carries a private marker
+        instead of the content. Redaction here, not CSS — her scratchpad
+        should not sit in the desk's memory as 'hidden but present'.
+        """
+        try:
+            if ev.get("type") == "thinking" and not self._thinking_visible():
+                safe = dict(ev)
+                safe["payload"] = {"private": True, "scratchpad": True}
+                return safe
+        except Exception:
+            pass
+        return ev
+
+    def _on_trajectory_event(self, ev: dict) -> None:
+        """Observer target: forward one appended envelope to the JS Seat.
+
+        Immediate forward (trajectory events are orders of magnitude sparser
+        than streaming tokens; per-call bridge overhead is fine). Best-effort:
+        any failure is swallowed — the writer's own fail-open guard is the
+        outer wall, this is the inner one. A desk that cannot receive costs
+        nothing to the record or the partner.
+        """
+        if self._window is None:
+            return
+        try:
+            payload = json.dumps(self._seat_safe(ev), default=str)
+            self._window.evaluate_js(
+                f"window.__trajectory_event && window.__trajectory_event({payload});"
+            )
+        except Exception:
+            pass
+
+    def get_trajectory(self, from_seq: int = 0) -> dict:
+        """Catch-up read for the Seat (design §2.3): the current session's
+        stream from disk, from a seq cursor. A desk opened mid-session (or a
+        reloaded frontend) backfills through this before going live; the
+        frontend dedupes on seq so live + backfill never double-render.
+        """
+        if not self.session:
+            return {"ok": False, "error": "Backend not initialized.", "events": []}
+        try:
+            from partner_client.trajectory import read_stream
+
+            tdir = self.memory.sessions_dir.parent / "trajectory"
+            path = tdir / f"session-{self.session.session_num:03d}.jsonl"
+            if not path.exists():
+                # Absent-by-design (trajectory disabled / no events yet) is
+                # not an error — an empty feed with an honest reason.
+                return {"ok": True, "events": [], "note": "no stream for this session"}
+            events = [
+                self._seat_safe(e)
+                for e in read_stream(path)
+                if isinstance(e.get("seq"), int) and e["seq"] >= int(from_seq)
+            ]
+            return {"ok": True, "events": events}
+        except Exception as e:
+            # Sentence-never-a-stack (her ruling, desk law as of Phase 1):
+            # the operator gets one plain line; the stack goes to the log.
+            log.exception("get_trajectory failed")
+            return {
+                "ok": False,
+                "error": "The feed could not be read — the record itself is unaffected.",
+                "events": [],
+            }
 
     def _render_messages(self, raw: list[dict]) -> list[dict]:
         """Transform raw session messages into the chat-view shape:
