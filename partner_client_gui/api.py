@@ -521,6 +521,58 @@ class GuiApi:
         except Exception:
             pass
 
+    # ── the View dial: per-session persistence (design §3.5) ──
+    # An OPERATOR INSTRUMENT, never her record — same class as
+    # .session-labels.json, stored beside it in a dot-sidecar.
+
+    _DIAL_POSITIONS = ("verbose", "normal", "summary")
+
+    def _seat_prefs_path(self) -> "Path | None":
+        if not self.memory:
+            return None
+        return Path(self.memory.sessions_dir) / ".seat-prefs.json"
+
+    def get_seat_dial(self) -> dict:
+        """The dial position for the current session (default: normal)."""
+        try:
+            sp = self._seat_prefs_path()
+            if sp and sp.is_file():
+                data = json.loads(sp.read_text(encoding="utf-8"))
+                entry = data.get(str(self.session.session_num), {}) if isinstance(data, dict) else {}
+                dial = entry.get("dial", "normal")
+                if dial in self._DIAL_POSITIONS:
+                    return {"ok": True, "dial": dial}
+            return {"ok": True, "dial": "normal"}
+        except Exception:
+            log.exception("get_seat_dial failed")
+            return {"ok": True, "dial": "normal"}  # a broken pref is never a broken desk
+
+    def set_seat_dial(self, dial: str) -> dict:
+        """Persist the operator's dial choice for this session."""
+        if dial not in self._DIAL_POSITIONS:
+            return {"ok": False, "error": f"Unknown dial position: {dial}"}
+        try:
+            sp = self._seat_prefs_path()
+            if not sp:
+                return {"ok": False, "error": "Backend not initialized."}
+            data = {}
+            if sp.is_file():
+                try:
+                    loaded = json.loads(sp.read_text(encoding="utf-8"))
+                    if isinstance(loaded, dict):
+                        data = loaded
+                except (OSError, json.JSONDecodeError):
+                    data = {}
+            key = str(self.session.session_num)
+            data.setdefault(key, {})
+            data[key]["dial"] = dial
+            sp.parent.mkdir(parents=True, exist_ok=True)
+            sp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+            return {"ok": True, "dial": dial}
+        except Exception:
+            log.exception("set_seat_dial failed")
+            return {"ok": False, "error": "The dial preference could not be saved — the view still switched."}
+
     _ARTIFACT_DISPLAY_CAP = 512 * 1024  # inline read-only view cap (bytes)
 
     def _load_call_args(self, call_seq: int) -> dict | None:

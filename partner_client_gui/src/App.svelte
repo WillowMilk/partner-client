@@ -370,6 +370,24 @@
     messages = [...messages];
   }
 
+  // The View dial (design §3.5): one control, three positions, per-session,
+  // switchable mid-conversation. A RENDER FILTER — every event is kept;
+  // flipping re-renders history instantly, both directions, mid-turn.
+  // Floor rows pass every position. Persistence is an operator instrument
+  // (.seat-prefs.json, beside the labels sidecar) — never her record.
+  const DIAL_POSITIONS = [
+    ['verbose', 'Verbose', 'Every event as it happens'],
+    ['normal',  'Normal',  'Activity feed + artifacts + gates + clock'],
+    ['summary', 'Summary', 'Spoken words + sovereignty/gates + final durations'],
+  ];
+
+  function set_dial(pos) {
+    view_dial = pos;  // instant — the view never waits on the sidecar
+    try {
+      window.pywebview?.api?.set_seat_dial?.(pos);  // fire-and-forget persist
+    } catch (_) { /* a broken pref is never a broken desk */ }
+  }
+
   async function _seat_backfill(api) {
     // A desk opened mid-session: seed the dedupe set and, if a turn is
     // open on the stream, resume the presence line at its TRUE elapsed —
@@ -588,6 +606,11 @@
       // The Operator's Seat: backfill the dedupe cursor + resume an open
       // turn's clock at its TRUE elapsed (never a lying zero). Non-blocking.
       _seat_backfill(api);
+
+      // The dial remembers its per-session position (operator sidecar).
+      api.get_seat_dial?.().then((r) => {
+        if (r && r.ok && r.dial) view_dial = r.dial;
+      }).catch(() => {});
 
       await load_search_backends();
 
@@ -1103,6 +1126,17 @@
           {messages.length > 0 ? 'Active conversation' : 'The bench'}
         {/if}
       </div>
+      <!-- The View dial (Operator's Seat §3.5): render filter, never a
+           subscription filter. Sovereignty, gates, and substrate notices
+           are the floor of every position. -->
+      {#if !viewing_archive}
+        <div class="view-dial" role="group" aria-label="View detail level">
+          {#each DIAL_POSITIONS as [pos, label, hint]}
+            <button class="view-dial-btn" class:active={view_dial === pos}
+                    title={hint} onclick={() => set_dial(pos)}>{label}</button>
+          {/each}
+        </div>
+      {/if}
       <div class="substrate-dropdown-anchor">
         <button
           class="substrate-display"

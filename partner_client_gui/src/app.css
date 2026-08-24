@@ -2038,3 +2038,35 @@ button.sidebar-link-button.active { background: var(--bg-hover); border-radius: 
   word-break: break-word;
   user-select: text;
 }
+
+/* ── The View dial (Phase 1 increment 5) ──
+ * One control, three positions, per-session, mid-turn switchable.
+ * Operator-accent (this is the operator's instrument, not the partner's). */
+.view-dial {
+  display: inline-flex;
+  border: 1px solid color-mix(in srgb, var(--accent-operator) 35%, transparent);
+  border-radius: 6px;
+  overflow: hidden;
+  margin-right: 0.8em;
+  flex: none;
+}
+.view-dial-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: var(--text-meta);
+  color: var(--text-muted);
+  padding: 0.15em 0.7em;
+  line-height: 1.6;
+}
+.view-dial-btn + .view-dial-btn {
+  border-left: 1px solid color-mix(in srgb, var(--accent-operator) 25%, transparent);
+}
+.view-dial-btn.active {
+  background: color-mix(in srgb, var(--accent-operator) 14%, transparent);
+  color: var(--accent-operator-hover);
+  font-weight: 600;
+}
+.view-dial-btn:hover:not(.active) {
+  background: color-mix(in srgb, var(--accent-operator) 6%, transparent);
+}

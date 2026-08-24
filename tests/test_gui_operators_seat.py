@@ -251,3 +251,39 @@ def test_chevron_failure_is_a_sentence(tmp_path):
     a.session = None
     r = a.get_artifact("/anything")
     assert r["ok"] is False and "\n" not in r["error"]
+
+
+# ── the View dial: sidecar persistence (increment 5, design §3.5) ──────
+
+def test_dial_defaults_to_normal(tmp_path):
+    a = _bare_api(tmp_path)
+    r = a.get_seat_dial()
+    assert r["ok"] and r["dial"] == "normal"
+
+
+def test_dial_round_trip_per_session(tmp_path):
+    a = _bare_api(tmp_path)
+    assert a.set_seat_dial("summary")["ok"]
+    assert a.get_seat_dial()["dial"] == "summary"
+    # another session keeps its own default
+    a.session.session_num = 9
+    assert a.get_seat_dial()["dial"] == "normal"
+    # sidecar lives beside the labels file — operator instrument, dot-named
+    assert (tmp_path / "Memory" / "sessions" / ".seat-prefs.json").is_file()
+
+
+def test_dial_rejects_unknown_position(tmp_path):
+    a = _bare_api(tmp_path)
+    r = a.set_seat_dial("x-ray")
+    assert r["ok"] is False and "x-ray" in r["error"]
+
+
+def test_dial_survives_corrupt_sidecar(tmp_path):
+    """A broken pref is never a broken desk."""
+    a = _bare_api(tmp_path)
+    sp = tmp_path / "Memory" / "sessions" / ".seat-prefs.json"
+    sp.parent.mkdir(parents=True, exist_ok=True)
+    sp.write_text("{not json")
+    assert a.get_seat_dial() == {"ok": True, "dial": "normal"}
+    assert a.set_seat_dial("verbose")["ok"]      # rewrites cleanly
+    assert a.get_seat_dial()["dial"] == "verbose"
