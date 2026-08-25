@@ -1069,6 +1069,14 @@ class GuiApi:
                 except OSError:
                     continue
 
+        # Busy-guard (litigators' docket, 2026-08-25): while this turn is in
+        # flight, the ground-moving doors (sail/sleep/switch) refuse politely.
+        # A second send is also refused — one turn at a time is the loop's
+        # contract, and the frontend's disable is courtesy, not the wall.
+        if getattr(self, "_turn_in_flight", False):
+            return {"ok": False, "error":
+                    "A turn is already in flight — let it finish first."}
+        self._turn_in_flight = True
         try:
             started = time.perf_counter()
             self.session.append_user(send_text, images=images or None)
@@ -1143,6 +1151,16 @@ class GuiApi:
                           f"({type(e).__name__}). The conversation and the record "
                           "are unaffected; the details are in the log."),
             }
+        finally:
+            self._turn_in_flight = False
+
+    def _busy_refusal(self, verb: str) -> "dict | None":
+        """One check for every ground-moving door: a turn in flight means
+        the room is occupied. One plain sentence, never a wall of state."""
+        if getattr(self, "_turn_in_flight", False):
+            return {"ok": False, "error":
+                    f"A turn is in flight — let her finish speaking, then {verb}."}
+        return None
 
     # ============================================================
     # JS-callable: substrate switcher (Phase 2b-1)
@@ -1250,6 +1268,9 @@ class GuiApi:
         Returns {ok: bool, message: str, new_model?: str, new_backend?: str,
                  backup_path?: str, error?: str}.
         """
+        _busy = self._busy_refusal("switch")
+        if _busy:
+            return _busy
         if not self.config or not self.session:
             return {"ok": False, "error": "Backend not initialized."}
         if not new_model or not new_model.strip():
@@ -1640,6 +1661,9 @@ class GuiApi:
         button. Optional `label`: the operator's name for the closing
         conversation — stored in the labels sidecar.
         Returns {ok, archive_path}."""
+        _busy = self._busy_refusal("sail")
+        if _busy:
+            return _busy
         if not self.session or not self.config:
             return {"ok": False, "error": "Backend not initialized."}
         try:
@@ -1678,6 +1702,9 @@ class GuiApi:
     def sail_status(self) -> dict:
         """What the sail dialog shows: has the partner curated her floor?
         Returns {ok, floor_chosen, floor_preview}."""
+        _busy = self._busy_refusal("sail")
+        if _busy:
+            return _busy
         if not self.config:
             return {"ok": False, "error": "Backend not initialized."}
         try:
