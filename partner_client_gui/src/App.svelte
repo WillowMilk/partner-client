@@ -665,9 +665,21 @@
       } else {
         // Last-resort: streaming didn't fire at all but response is OK.
         // Use the final text returned by the API (matches Phase 2a behavior).
-        const already_appended = messages.length > 0 &&
-                                  messages[messages.length - 1].role === 'assistant' &&
-                                  messages[messages.length - 1].content === result.assistant_text;
+        // THE DOUBLE-RENDER LESSON (2026-08-24, first live Seat run): this
+        // guard used to check only messages[last] — but the Seat's
+        // turnstamp (and feed rows) now land AFTER the streamed commit, so
+        // the tail is furniture, not voice, and the guard re-appended her
+        // words. Walk back past Seat furniture to the last VOICE message.
+        // Her record was never affected (desk-render only) — but the pane
+        // must witness as honestly as the record does.
+        const SEAT_FURNITURE = new Set(['feedrow', 'turnstamp', 'lumen', 'divider']);
+        let last_voice = null;
+        for (let k = messages.length - 1; k >= 0; k--) {
+          if (!SEAT_FURNITURE.has(messages[k].role)) { last_voice = messages[k]; break; }
+        }
+        const already_appended = last_voice !== null &&
+                                  last_voice.role === 'assistant' &&
+                                  last_voice.content === result.assistant_text;
         if (!already_appended && result.assistant_text) {
           messages = [...messages, { role: 'assistant', content: result.assistant_text }];
         }
