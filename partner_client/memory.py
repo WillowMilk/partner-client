@@ -228,8 +228,32 @@ class Memory:
             m for m in messages
             if m.get("role") != "system" and not m.get("carried")
         ]
-        # n pairs = 2n messages
-        return lived[-(2 * n):]
+        # TURN-ALIGNED carry (litigators' finding, fixed 2026-08-25): the
+        # old fixed-count slice (last 2n messages) could open mid-turn on an
+        # ORPHANED tool result — a result whose call sits outside the window,
+        # context implying a reach whose intent is invisible — and tool-heavy
+        # turns consumed the pair budget, carrying plumbing instead of words.
+        # Now: walk back to the Nth-from-last USER message and carry from
+        # there — whole exchanges only, tool pairs intact by construction.
+        pairs_seen = 0
+        cutoff = None
+        for i in range(len(lived) - 1, -1, -1):
+            if lived[i].get("role") == "user":
+                pairs_seen += 1
+                if pairs_seen == n:
+                    cutoff = i
+                    break
+        if cutoff is None:
+            # Fewer than n exchanges: carry from the first user turn. A
+            # record with NO user turns carries nothing — a tail of pure
+            # plumbing serves no texture.
+            cutoff = next(
+                (i for i, m in enumerate(lived) if m.get("role") == "user"),
+                None,
+            )
+            if cutoff is None:
+                return []
+        return lived[cutoff:]
 
     def _latest_archived_session(self) -> Path | None:
         """Most recent dated session JSON (excluding current.json)."""
