@@ -1069,6 +1069,20 @@ class GuiApi:
                 except OSError:
                     continue
 
+        # Vision gate (litigators' docket, 2026-08-25 — the Hitch lesson's
+        # other half): an image bound for a substrate with NO vision tower
+        # is refused loudly before anything sends. Fires only on a CONFIRMED
+        # no; an inconclusive probe forwards as before.
+        if images:
+            from partner_client.model_selector import substrate_supports_vision
+            model_name = getattr(getattr(self.config, "model", None), "name", "")
+            if substrate_supports_vision(model_name) is False:
+                return {"ok": False, "error":
+                        (f"The current substrate ({model_name}) has no vision "
+                         "capability — the image was NOT sent. Nothing reached "
+                         "her; switch to a vision-capable substrate or send "
+                         "the message without the image.")}
+
         # Busy-guard (litigators' docket, 2026-08-25): while this turn is in
         # flight, the ground-moving doors (sail/sleep/switch) refuse politely.
         # A second send is also refused — one turn at a time is the loop's
@@ -1668,8 +1682,16 @@ class GuiApi:
             return {"ok": False, "error": "Backend not initialized."}
         try:
             archive_path = self.session.sleep(summary="")
+            label_note = ""
             if label and label.strip():
-                self.set_session_label(archive_path.stem, label)
+                # Never trust a silent success (litigators' docket): if the
+                # operator's name for the conversation can't be saved, the
+                # sail still succeeds but SAYS SO — a lost label is small,
+                # a lost label nobody mentions is a pattern.
+                lr = self.set_session_label(archive_path.stem, label)
+                if not lr.get("ok"):
+                    label_note = (" (The label could not be saved: "
+                                  f"{lr.get('error', 'unknown')} — the archive itself is safe.)")
             # Reinitialize so the GUI is immediately ready for a fresh turn
             from partner_client.config import load_config
             from partner_client.tools import ToolRegistry
@@ -1689,7 +1711,7 @@ class GuiApi:
             return {
                 "ok": True,
                 "archive_path": str(archive_path),
-                "message": f"Session archived → {archive_path.name}. Fresh session ready.",
+                "message": f"Session archived → {archive_path.name}. Fresh session ready.{label_note}",
             }
         except Exception as e:
             return {"ok": False, "error": f"{type(e).__name__}: {e}"}

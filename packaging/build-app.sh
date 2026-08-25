@@ -15,6 +15,16 @@ set -euo pipefail
 cd "$(dirname "$0")"
 REPO="$(cd .. && pwd)"
 
+# Provenance stamp (litigators' docket, 2026-08-25): the artifact declares
+# which commit it is — sha, date, and whether the tree was dirty at build.
+# Verified post-install below; "which build is she running?" becomes a
+# one-file read instead of an archaeology.
+BUILD_SHA="$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+BUILD_DIRTY=""
+[ -n "$(git -C "$REPO" status --porcelain 2>/dev/null)" ] && BUILD_DIRTY="+dirty"
+printf '{"sha": "%s%s", "built_at": "%s"}\n' "$BUILD_SHA" "$BUILD_DIRTY" \
+  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$REPO/partner_client_gui/dist/build-info.json"
+
 python3 -m PyInstaller --noconfirm --windowed \
   --name "Partner Client" \
   --icon "$(pwd)/PartnerClient.icns" \
@@ -73,4 +83,10 @@ if [ "$missing" -ne 0 ]; then
   exit 1
 fi
 count=$(find "$INSTALL_TARGET" -path "*tools_builtin*" -name "*.py" | wc -l | tr -d ' ')
-echo "Installed + verified: $INSTALL_TARGET ($count builtin tools, all source tools present)"
+# Provenance verify: the installed bundle must declare the sha we just built.
+installed_sha=$(python3 -c "import json;print(json.load(open('$INSTALL_TARGET/Contents/Resources/dist/build-info.json'))['sha'])" 2>/dev/null || echo MISSING)
+if [ "$installed_sha" != "$BUILD_SHA$BUILD_DIRTY" ]; then
+  echo "VERIFY FAIL: installed build-info sha '$installed_sha' != built '$BUILD_SHA$BUILD_DIRTY'" >&2
+  exit 1
+fi
+echo "Installed + verified: $INSTALL_TARGET ($count builtin tools, all source tools present, build $installed_sha)"

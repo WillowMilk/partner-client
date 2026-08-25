@@ -376,3 +376,39 @@ def resolve_active_model(
     if not model_is_available(config_model_name, entries):
         return config_model_name, format_unavailable_error(config_model_name, entries)
     return config_model_name, None
+
+
+# ── vision-capability gate (litigators' docket, 2026-08-25) ──────────────
+# THE HARD RULE (the Hitch lesson): a directive that cannot execute is
+# refused loudly, never passed through as success-shaped failure. An image
+# forwarded to a substrate with no vision tower is exactly that shape —
+# the conversation says a photo arrived; zero pixels reach the layers; the
+# model fills the void with its nearest memory. The gate asks the backend
+# what the substrate can actually do, and refuses only on a CONFIRMED no.
+
+_vision_cache: dict[str, "bool | None"] = {}
+
+
+def substrate_supports_vision(model_name: str) -> "bool | None":
+    """True/False when the backend declares capabilities; None when unknown.
+
+    None means the probe was inconclusive (old backend, network hiccup) —
+    callers forward as before on None: the gate fires only on certainty,
+    so it can never become its own false wall.
+    """
+    if not model_name:
+        return None
+    if model_name in _vision_cache:
+        return _vision_cache[model_name]
+    result: "bool | None" = None
+    try:
+        import ollama
+        info = ollama.show(model_name)
+        d = info.model_dump() if hasattr(info, "model_dump") else dict(info)
+        caps = d.get("capabilities")
+        if isinstance(caps, list):
+            result = "vision" in caps
+    except Exception:
+        result = None  # inconclusive — never block on an uncertain probe
+    _vision_cache[model_name] = result
+    return result
