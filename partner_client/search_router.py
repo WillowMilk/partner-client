@@ -94,6 +94,26 @@ def run_search(config, query: str, max_results: int = 5) -> str:
             return f"Unknown search backend type '{backend.type}' for '{search.active}'."
     except Exception as e:  # noqa: BLE001 — surface honest failure as text
         log.warning("web_search via %s failed: %s", search.active, e)
+        # FREE-ONLY FAILOVER (litigators' docket, 2026-08-25): a dead engine
+        # should degrade the capability, not remove it. The chain reaches
+        # ONLY the free keyless fallback (ddg) — never a metered backend;
+        # auto-failover must not spend the operator's money (cost honesty).
+        # The shim names both the fallback and the failure: full provenance,
+        # nothing silent.
+        if backend.type != "ddg":
+            try:
+                raw = _search_ddg(query, n)
+                if raw and raw.strip():
+                    return (
+                        f"[Search · via DuckDuckGo (fallback — {label} failed: {e})] "
+                        f"provides the following results:\n\n{raw}"
+                    )
+            except Exception as fe:  # noqa: BLE001
+                log.warning("web_search fallback (ddg) also failed: %s", fe)
+                return (
+                    f"[Search · via {label}] the search attempt failed: {e} "
+                    f"(the free fallback engine also failed: {fe})"
+                )
         return f"[Search · via {label}] the search attempt failed: {e}"
 
     if not raw or not raw.strip():
