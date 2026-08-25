@@ -1847,11 +1847,14 @@ class _WebViewStreamSink:
         self._is_open = False
 
     def show_tool_call(self, name: str, args: dict, result: str) -> None:
-        # Lumen-surface: when the partner casts Lumens (her parallel cognition),
-        # surface it as a distinct, identity-bearing event — the reach made
-        # visible — rather than a raw tool-result blob. The cast is recognized
-        # by its signature `tasks` list; the labels come straight from the args,
-        # so nothing is lost to the 500-char result truncation.
+        # Lumen-surface ONLY (Phase 1 increment 7, 2026-08-24): the generic
+        # __stream_tool_call path is retired — the Operator's Seat feed
+        # (trajectory-fed, per-row elapsed, artifact chevrons) renders a
+        # strict superset, live-proven on Aletheia's real turns before the
+        # retirement (expand-without-evicting: verified, then removed).
+        # The cast-card stays: it is the identity-bearing surface for
+        # parallel reach — the labels come straight from the args, so
+        # nothing is lost to the 500-char result truncation.
         try:
             tasks = args.get("tasks") if isinstance(args, dict) else None
             if isinstance(tasks, list) and tasks:
@@ -1861,12 +1864,8 @@ class _WebViewStreamSink:
                     if isinstance(t, dict)
                 ]
                 self._call_js("__lumen_cast", json.dumps(labels), self._subagent_term)
-                return
-            # Other tools: log-only for now (Phase 2c adds a tool-call panel).
-            args_json = json.dumps(args, default=str)[:200]
-            self._call_js("__stream_tool_call", name, args_json, str(result)[:500])
         except Exception:
-            pass  # tool-call display is non-essential to streaming UX
+            pass  # cast-card display is non-essential to streaming UX
 
     def _flush(self) -> None:
         if not self._buffer:

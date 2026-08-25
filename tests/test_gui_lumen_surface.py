@@ -56,10 +56,14 @@ def test_cast_emits_single_lumen_event_with_labels_and_term() -> None:
 
 
 def test_normal_tool_does_not_emit_lumen_event() -> None:
+    # Contract updated 2026-08-24 (Phase 1 increment 7): the generic
+    # __stream_tool_call path is RETIRED — normal tools emit NOTHING through
+    # the sink; the Operator's Seat feed (trajectory-fed) carries them,
+    # live-proven superset before removal. Only real casts emit.
     sink, win = _sink()
     sink.show_tool_call("read_file", {"path": "/x"}, "file contents")
     assert not [c for c in win.calls if "__lumen_cast" in c]
-    assert [c for c in win.calls if "__stream_tool_call" in c]
+    assert win.calls == []  # the sink is Lumen-surface only now
 
 
 def test_missing_label_falls_back_to_reach_n() -> None:
@@ -79,9 +83,10 @@ def test_missing_label_falls_back_to_reach_n() -> None:
 def test_empty_tasks_list_is_not_treated_as_a_cast() -> None:
     sink, win = _sink()
     sink.show_tool_call("some_tool", {"tasks": []}, "result")
-    # empty tasks → not a cast → routes to the generic tool path
+    # empty tasks → not a cast → and the generic path is retired
+    # (increment 7): no cast-card, and nothing else either.
     assert not [c for c in win.calls if "__lumen_cast" in c]
-    assert [c for c in win.calls if "__stream_tool_call" in c]
+    assert win.calls == []
 
 
 def test_labels_are_valid_json_array() -> None:

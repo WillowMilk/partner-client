@@ -569,10 +569,9 @@
       }
       streaming_message = null;
     };
-    window.__stream_tool_call = (name, args_json, result) => {
-      // MVP: log only. Phase 2c will render tool calls inline.
-      console.log('[tool]', name, args_json, result?.slice?.(0, 100));
-    };
+    // __stream_tool_call retired (Phase 1 increment 7): the Seat's
+    // trajectory-fed feed renders a strict superset — live-proven before
+    // removal. The Lumen cast-card (__lumen_cast) remains below.
     // Lumen-surface: the partner's parallel reach, made visible. When she
     // casts Lumens, drop a distinct gold cast-card into the conversation —
     // the act of reaching seen as itself, not folded silently into the prose.
