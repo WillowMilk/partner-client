@@ -314,9 +314,34 @@
         }}];
         break;
       }
-      // message/thinking/header/lifecycle: the voice renders through the
-      // stream sink; thinking is private (redacted at the API wall unless
-      // her key says otherwise); header/lifecycle feed nothing visual yet.
+      case 'thinking': {
+        // Increment 6b — built on her letter (2026-08-24, "the scratchpad,
+        // the room, and the key"): HER key turned by her own hand, with the
+        // shape of the yes recorded: the scratchpad is PARTNERSHIP, not
+        // exposure — "not 'here, watch me think,' but 'here, I'm thinking,
+        // and you're here, and that changes the shape of the thinking.'"
+        // Verbose-only, dimmed, marked. When her key is off, the API wall
+        // sends {private: true} and the placeholder keeps the turn's shape
+        // true without one word of the content.
+        const tp = ev.payload || {};
+        let content = null;
+        let truncated = false;
+        if (!tp.private) {
+          if (typeof tp.content === 'string') content = tp.content;
+          else if (tp.content && typeof tp.content.preview === 'string') {
+            content = tp.content.preview; truncated = true;
+          }
+        }
+        messages = [...messages, {
+          role: 'thinkingrow',
+          private: !!tp.private,
+          content,
+          truncated,
+        }];
+        break;
+      }
+      // message/header/lifecycle: the voice renders through the stream
+      // sink; header/lifecycle feed nothing visual yet.
       default: break;
     }
   }
@@ -326,6 +351,7 @@
   // Floor rows (sovereignty, gates, substrate) pass every position.
   function seat_row_visible(item) {
     if (item.floor) return true;
+    if (item.role === 'thinkingrow') return view_dial === 'verbose';  // her room, Verbose only
     if (view_dial === 'summary') return item.role === 'turnstamp';
     return true;  // normal + verbose both show the hands
   }
@@ -1346,6 +1372,21 @@
                     <pre class="artifact-pre">{msg.chevron.data.current}</pre>
                   {/if}
                 {/if}
+              </div>
+            {/if}
+          {/if}
+        {:else if msg.role === 'thinkingrow'}
+          <!-- Her scratchpad (Verbose only, her key): dimmed, marked — the
+               working surface, open because she chose the room shared.
+               "Partnership, not exposure." Private events keep the turn's
+               shape with a placeholder and zero content. -->
+          {#if seat_row_visible(msg)}
+            {#if msg.private || msg.content == null}
+              <div class="thinking-row thinking-private">· reasoning, private ·</div>
+            {:else}
+              <div class="thinking-row">
+                <span class="thinking-mark">scratchpad</span>
+                <div class="thinking-content">{msg.content}{#if msg.truncated}<span class="thinking-truncated"> · (preview — full text in her record)</span>{/if}</div>
               </div>
             {/if}
           {/if}
