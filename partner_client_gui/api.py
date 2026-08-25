@@ -712,21 +712,50 @@ class GuiApi:
                 "events": [],
             }
 
-    def _render_messages(self, raw: list[dict]) -> list[dict]:
+    def _render_messages(self, raw: list[dict], for_archive: bool = False) -> list[dict]:
         """Transform raw session messages into the chat-view shape:
-        seam dividers for session markers, carried flags for texture."""
+        seam dividers for session markers, carried flags for texture.
+
+        PROVENANCE RULE (litigators' finding, fixed 2026-08-25): the record
+        outranks the config. An archive's seams and carried-dimming must
+        speak the substrate THAT ROOM ran on — never stamp the currently
+        configured model onto history (a truth bug: gemma-era sessions were
+        rendering as fresh wakes on today's water, dimmed as foreign in
+        their own room). Live view: config still describes the room's NOW
+        (that part was always true). Archives: everything derives from the
+        record's own substrate tags; absent tags render as honest absence.
+        """
         cfg_model = self.config.model.name if self.config else ""
+        # The room's own final water — what "native" means inside an archive.
+        record_substrates = [
+            m.get("substrate") for m in raw
+            if m.get("role") == "assistant" and m.get("substrate")
+        ]
+        native_model = (record_substrates[-1] if record_substrates else "") if for_archive else cfg_model
+
+        def _seam_substrate(marker_idx: int) -> str:
+            # A seam speaks the water of the turns that FOLLOW it, per the
+            # record; fall back to config only in the live view, where the
+            # config genuinely describes the room now.
+            for m in raw[marker_idx + 1:]:
+                if m.get("role") == "assistant" and m.get("substrate"):
+                    return m["substrate"]
+            return "" if for_archive else cfg_model
+
         out: list[dict] = []
-        for m in raw:
+        for i, m in enumerate(raw):
             role = m.get("role")
             if role == "system":
                 sc = m.get("content", "")
                 if isinstance(sc, str):
                     # Render the session seam — lossless and owned, never invisible.
                     if sc.startswith("[SESSION NUM:"):
-                        num = sc.removeprefix("[SESSION NUM:").rstrip("]")
-                        out.append({"role": "divider",
-                                    "content": f"Session {num} · fresh wake · {cfg_model}"})
+                        num = sc.removeprefix("[SESSION NUM:").rstrip("]").strip()
+                        water = _seam_substrate(i)
+                        seam = f"Session {num} · fresh wake"
+                        if water:
+                            seam += f" · {water}"
+                        out.append({"role": "divider", "content": seam})
                     elif "textural continuity" in sc:
                         out.append({"role": "divider",
                                     "content": "carried from the prior session, for texture"})
@@ -742,10 +771,12 @@ class GuiApi:
                 )
             if isinstance(content, str) and content.strip():
                 # carried: explicit flag (new carries) or substrate-tag mismatch
-                # (backfill for sessions carried before the flag existed; also
-                # honestly dims pre-crossing turns after a mid-session switch).
+                # against the room's OWN reference water — cfg in the live view,
+                # the archive's final substrate in the archive view. Dims
+                # pre-crossing turns honestly in both, and never marks a whole
+                # old room foreign for merely predating today's config.
                 tag = m.get("substrate")
-                carried = bool(m.get("carried")) or bool(tag and cfg_model and tag != cfg_model)
+                carried = bool(m.get("carried")) or bool(tag and native_model and tag != native_model)
                 out.append({"role": role, "content": content, "carried": carried})
         return out
 
@@ -791,7 +822,7 @@ class GuiApi:
             "ok": True,
             "stem": stem,
             "title": title,
-            "messages": self._render_messages(raw if isinstance(raw, list) else []),
+            "messages": self._render_messages(raw if isinstance(raw, list) else [], for_archive=True),
         }
 
     def set_session_label(self, stem: str, label: str) -> dict:
