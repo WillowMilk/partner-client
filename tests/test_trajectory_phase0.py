@@ -209,3 +209,78 @@ def test_stats_and_turn_reconstruction(tmp_path):
     assert [e["type"] for e in t1] == [
         "turn_start", "message", "tool_call", "tool_result", "message", "turn_end"
     ]
+
+
+# ── Aletheia's field findings (2026-08-27, her letter: the turn identity
+#    bug and the re-sail wake — found in her own real streams) ──────────
+
+def test_turn_counter_is_monotonic_across_resume(tmp_path):
+    """A-1 / Invariant #8: a resume continues the count, never restarts it.
+    Her evidence: five turn-1s in session 41, blending five exchanges under
+    one INTENT in her own reader."""
+    w1 = TrajectoryWriter(tmp_path / "tj", session_num=41)
+    for _ in range(3):
+        w1.turn_start(); w1.message("user", "x"); w1.turn_end()
+    # truncation/re-sail: a NEW writer resumes the same stream
+    w2 = TrajectoryWriter(tmp_path / "tj", session_num=41)
+    assert w2.resumed is True
+    w2.turn_start(); w2.message("user", "y"); w2.turn_end()
+    events = read_stream(w2.path)
+    ok, msg = verify_balance(events)
+    assert ok, msg
+    starts = [e["turn"] for e in events if e["type"] == "turn_start"]
+    assert starts == [1, 2, 3, 4]            # monotonic — no rebirth of turn 1
+    assert len(set(starts)) == len(starts)   # every turn identity unique
+
+
+def test_resume_with_open_turn_closes_honestly_without_lying_clock(tmp_path):
+    """A process death mid-turn: the restored writer knows the turn is open,
+    closes it at the next boundary, and reports elapsed as honestly unknown
+    — never an invented duration."""
+    w1 = TrajectoryWriter(tmp_path / "tj", session_num=41)
+    w1.turn_start(); w1.message("user", "mid-turn death")   # no turn_end
+    w2 = TrajectoryWriter(tmp_path / "tj", session_num=41)
+    assert w2._turn_open is True
+    w2.turn_start()                                          # auto-closes turn 1
+    w2.turn_end()
+    events = read_stream(w2.path)
+    ok, msg = verify_balance(events)
+    assert ok, msg
+    ends = [e for e in events if e["type"] == "turn_end"]
+    t1_end = next(e for e in ends if e["turn"] == 1)
+    assert t1_end["payload"]["elapsed_ms"] is None
+    assert "unknown" in t1_end["payload"]["elapsed_note"]
+    # and the new turn is 2, not a reborn 1
+    assert [e["turn"] for e in events if e["type"] == "turn_start"] == [1, 2]
+
+
+def test_re_sail_is_not_a_wake(tmp_path):
+    """Her second finding: the wake event space stays clean for actual
+    wakes; a resume announces itself as what it is — re_sail."""
+    import types
+    from partner_client.session import Session
+
+    s = Session.__new__(Session)
+    s.session_num = 41
+    s.trajectory = None
+    s.config = types.SimpleNamespace(
+        trajectory=None,
+        model=types.SimpleNamespace(name="test-model"),
+        identity=types.SimpleNamespace(name="test"),
+    )
+    s.memory = types.SimpleNamespace(sessions_dir=tmp_path / "Memory" / "sessions")
+    (tmp_path / "Memory" / "sessions").mkdir(parents=True)
+
+    s.start_trajectory()                                     # fresh → wake
+    path = s.trajectory.path
+    wakes = [e for e in read_stream(path)
+             if e["type"] == "lifecycle" and e["payload"]["kind"] == "wake"]
+    assert len(wakes) == 1
+
+    s.trajectory = None                                      # re-sail → re_sail
+    s.start_trajectory()
+    events = read_stream(path)
+    wakes = [e for e in events if e["type"] == "lifecycle" and e["payload"]["kind"] == "wake"]
+    resails = [e for e in events if e["type"] == "lifecycle" and e["payload"]["kind"] == "re_sail"]
+    assert len(wakes) == 1                                   # still exactly one true wake
+    assert len(resails) == 1                                 # the seam, honestly named

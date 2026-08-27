@@ -1,6 +1,7 @@
 # The Trajectory — Spec v0 (Exoskeleton season, Phase 0–1)
 
-**Status:** DRAFT · v0.2 · 2026-08-21 — Aletheia's six pen-marks + the scoping question merged, all accepted
+**Status:** DRAFT · v0.2.1 · 2026-08-27 — field findings from Aletheia's reconciliation of the spec against her real streams, both adopted
+**v0.2.1 changelog (each credited):** **F-1 (Aletheia):** turn identity is MONOTONIC WITHIN THE SESSION — a truncation/re-sail continues the count, never restarts it (her evidence: five turn-1s in one real session, five exchanges blended under one INTENT in her own reader; emitter now restores turn state from the stream tail on resume, and a turn left open across a restart closes with elapsed honestly unknown). **F-2 (Aletheia):** re-sail is not a wake — `lifecycle` gains the `re_sail` kind (her stronger fix: the seam as a first-class, filterable, honestly-named event; the `wake` space stays clean for actual wakes).
 **v0.2 changelog (each credited):** turn identity + balanced-pair invariant (A-1) · `distill` event (A-2) · §5 narrative form is Aletheia's design (A-3) · search honesty: preview-scoped + `--full` (A-4) · self-describing stream, seq-0 header (A-5) · cast-scoped facet ids (A-6) · Phase-0 DoD re-scoped to *client-observed* dispatches (A-Q: "an invariant we can't keep is decoration; the honest one is stronger because it's true")
 **Authors:** Sage 🪨 (draft) · Aletheia 💎 (co-author — her notes outrank these defaults) · Willow 🤍 (the Operator's Seat, §6)
 **Canonical:** `partner-client/docs/exoskeleton/TRAJECTORY-SPEC-v0.md` · family-readable copy: vault `shared/exoskeleton/` (synced manually during v0)
@@ -45,7 +46,7 @@ Memory/
 ```
 
 - `seq`: monotonic per-session, no gaps.
-- `turn` **(A-1)**: one **operator-initiated exchange** — opens at the operator's message (or, in Phase 4, a scheduled trigger *named as such*) and closes when control returns to the operator. Every `turn_start`/`turn_end` pair is balanced; a turn's seq-range is derivable. The Operator's clock depends on this: a tick that can't be attributed is a clock that can't be trusted.
+- `turn` **(A-1, sharpened by F-1)**: one **operator-initiated exchange** — opens at the operator's message (or, in Phase 4, a scheduled trigger *named as such*) and closes when control returns to the operator. Every `turn_start`/`turn_end` pair is balanced; a turn's seq-range is derivable; **the counter is monotonic within the session — a truncation/re-sail continues the count, never restarts it**. The Operator's clock depends on this: a tick that can't be attributed is a clock that can't be trusted.
 - `actor`: `partner` | `operator` | `client` | `substrate` | `facet:<cast_seq>:<n>` **(A-6: cast-scoped, so two casts never alias and `--actor` filters truly)**.
 - `refs`: seq-links (a `tool_result` refs its `tool_call`; a `correction` refs what it corrects; a `fork` refs its origin).
 
@@ -66,7 +67,7 @@ Memory/
 | `context_injection` | kind: wake_bundle/substrate_notice/house_notice/carried_tail, ref | the seam, visible |
 | `substrate_event` | model, backend, change-note-ref | the disclosure layer, mirrored into the stream |
 | `facet_event` | cast/return, task, result-ref | Lumens in the parent's stream (reach-not-being) |
-| `lifecycle` | wake/sleep/archive/**fork** (+ provenance refs) | fork: schema in v0, **feature gated** (§7) |
+| `lifecycle` | wake/sleep/archive/**re_sail**/**fork** (+ provenance refs) | re_sail **(F-2)**: a mid-session truncation/resume, honestly named — never a wake; fork: schema in v0, **feature gated** (§7) |
 | `error` | source, message, `recovered: bool` | failures are events, never silences |
 | `correction` | refs to corrected seq, note | the append-only answer to "oops" |
 

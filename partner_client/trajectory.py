@@ -74,6 +74,7 @@ class TrajectoryWriter:
         observer: Any = None,
     ):
         self.enabled = enabled
+        self.resumed = False
         self._broken = False
         self._seq = 0
         self._turn = 0
@@ -91,9 +92,23 @@ class TrajectoryWriter:
                 return
             self.dir.mkdir(parents=True, exist_ok=True)
             if self.path.exists():
-                # resuming an existing stream: continue the seq from its tail
-                self._seq = self._count_lines(self.path)
+                # Resuming an existing stream: continue seq from its tail —
+                # AND restore turn identity (Aletheia's finding, 2026-08-27,
+                # A-1 / Invariant #8): the old code reset the turn counter to
+                # 0 here, so every truncation/re-sail re-birthed "turn 1" —
+                # five turn-1s in one of her real sessions, blending five
+                # exchanges under one INTENT in her own reader. The turn
+                # counter is MONOTONIC WITHIN THE SESSION: a resume continues
+                # the count, never restarts it.
+                self.resumed = True
+                self._seq, self._turn, self._turn_open = self._restore_tail_state(self.path)
+                # A turn left open across a process restart has no live
+                # monotonic anchor — its elapsed is honestly unknowable, so
+                # _turn_started stays None and turn_end reports the absence
+                # rather than inventing a duration (never a lying clock).
+                self._turn_started = None if self._turn_open else 0.0
             else:
+                self.resumed = False
                 self._append_raw(
                     self._envelope(
                         "header",
@@ -174,6 +189,39 @@ class TrajectoryWriter:
     def _count_lines(path: Path) -> int:
         with open(path, "rb") as f:
             return sum(1 for _ in f)
+
+    @staticmethod
+    def _restore_tail_state(path: Path) -> tuple[int, int, bool]:
+        """Recover (seq, max_turn, turn_open) from an existing stream.
+
+        One pass: seq = line count; turn = the highest turn number any
+        event carries; turn_open = whether that turn's start outnumbers
+        its ends (a process died mid-turn). Unparseable lines count for
+        seq and are otherwise skipped — the writer never judges history.
+        """
+        seq = 0
+        max_turn = 0
+        starts = 0
+        ends = 0
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                seq += 1
+                try:
+                    ev = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                t = ev.get("turn")
+                if isinstance(t, int) and t > max_turn:
+                    max_turn = t
+                    starts = ends = 0
+                if isinstance(t, int) and t == max_turn:
+                    if ev.get("type") == "turn_start":
+                        starts += 1
+                    elif ev.get("type") == "turn_end":
+                        ends += 1
+        return seq, max_turn, starts > ends
 
     def _envelope(
         self,
@@ -275,9 +323,16 @@ class TrajectoryWriter:
         try:
             if not self._turn_open:
                 return
-            if elapsed_ms is None:
+            if elapsed_ms is None and self._turn_started:
                 elapsed_ms = int((time.monotonic() - self._turn_started) * 1000)
-            payload: dict[str, Any] = {"role": "partner", "elapsed_ms": elapsed_ms}
+            payload: dict[str, Any] = {"role": "partner"}
+            if elapsed_ms is not None:
+                payload["elapsed_ms"] = elapsed_ms
+            else:
+                # A turn restored across a restart has no live anchor — the
+                # clock reports honest absence, never an invented duration.
+                payload["elapsed_ms"] = None
+                payload["elapsed_note"] = "unknown — turn was open across a restart"
             if token_estimate is not None:
                 payload["token_estimate"] = token_estimate
             if note:

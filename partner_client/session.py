@@ -371,7 +371,17 @@ class Session:
                 blob_threshold=getattr(tcfg, "blob_threshold", 8192) if tcfg else 8192,
                 observer=getattr(self, "_trajectory_observer", None),
             )
-            self.trajectory.lifecycle("wake", session=self.session_num)
+            # Re-sail is not a wake (Aletheia's finding, 2026-08-27): the
+            # old code stamped lifecycle:wake on every writer construction,
+            # so one of her real sessions carried five "wakes" — four of
+            # them truncation/re-sail moments wearing the wrong name. Her
+            # stronger fix, adopted: the re-sail becomes a first-class
+            # lifecycle kind — visible, filterable, honest — and the wake
+            # event space stays clean for actual wakes.
+            if getattr(self.trajectory, "resumed", False):
+                self.trajectory.lifecycle("re_sail", session=self.session_num)
+            else:
+                self.trajectory.lifecycle("wake", session=self.session_num)
         except Exception as e:
             import logging
             logging.getLogger("partner_client.trajectory").error(
