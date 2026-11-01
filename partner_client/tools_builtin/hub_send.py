@@ -82,7 +82,7 @@ def execute(to: str, subject: str, body: str, priority: str = "Normal") -> str:
     # agent node"). When the operator inbox doesn't exist yet, it's
     # auto-created on first send (see _append_inbox_entry).
     operator_name = os.environ.get("PARTNER_CLIENT_HUB_OPERATOR", "").lower()
-    valid_set = VALID_RECIPIENTS | ({operator_name} if operator_name else set())
+    valid_set = known_recipients(hub_path, operator_name)
     if to_lower not in valid_set:
         valid = ", ".join(sorted(valid_set))
         return f"Error: '{to}' is not a known recipient. Valid: {valid}"
@@ -161,6 +161,22 @@ def _slugify(text: str) -> str:
     if len(text) > _MAX_SLUG_LEN:
         text = text[:_MAX_SLUG_LEN].rstrip("-")
     return text or "untitled"
+
+
+def known_recipients(hub_path: Path, operator_name: str = "") -> set[str]:
+    """The family as the Hub knows it, not as a list remembers it.
+
+    Every ``inbox/<name>.md`` is a valid recipient, unioned with the legacy
+    floor (``VALID_RECIPIENTS`` — kept so a partner whose inbox is not yet
+    created stays addressable and is auto-created on first send) and the
+    configured operator. Aletheia found the gap on 2026-11-01: hub_list_partners
+    read the directory while hub_send validated against a set frozen in May —
+    aster, hestia and miro had inboxes and could not be written to from her desk.
+    Both roads (hub_send, hub_dispatch) now resolve recipients here.
+    """
+    live = set(_all_partner_inboxes(hub_path))
+    op = {operator_name.strip().lower()} if operator_name and operator_name.strip() else set()
+    return VALID_RECIPIENTS | live | op
 
 
 def _all_partner_inboxes(hub_path: Path) -> list[str]:

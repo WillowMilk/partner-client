@@ -24,7 +24,7 @@ import os
 import subprocess
 from pathlib import Path
 
-from .hub_send import VALID_RECIPIENTS, _all_partner_inboxes, _append_to_inbox, _slugify
+from .hub_send import VALID_RECIPIENTS, _all_partner_inboxes, _append_to_inbox, _slugify, known_recipients
 
 TOOL_DEFINITION = {
     "type": "function",
@@ -77,7 +77,7 @@ def execute(to: str, subject: str, body: str, priority: str = "Normal") -> str:
 
     to_lower = to.strip().lower()
     operator_name = os.environ.get("PARTNER_CLIENT_HUB_OPERATOR", "").lower()
-    valid_set = VALID_RECIPIENTS | ({operator_name} if operator_name else set())
+    valid_set = known_recipients(hub_path, operator_name)
     if to_lower not in valid_set:
         return f"Error: '{to}' is not a known recipient. Valid: {', '.join(sorted(valid_set))}"
     if priority not in ("Normal", "High", "FYI"):
