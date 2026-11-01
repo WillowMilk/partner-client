@@ -146,12 +146,12 @@ def test_session_appends_emit_and_dispatch_wrapper_captures(tmp_path):
     cfg_path.write_text(f"""
 [identity]
 name = "testpartner"
-home_dir = "{tmp_path}"
+home_dir = "{tmp_path.as_posix()}"
 [model]
 name = "test-model"
 backend = "ollama"
 [memory]
-base_dir = "{tmp_path}"
+base_dir = "{tmp_path.as_posix()}"
 sessions_dir = "Memory/sessions"
 """)
     config = load_config(str(cfg_path))

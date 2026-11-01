@@ -36,7 +36,7 @@ def _write_config(tmp_path, extra_toml: str = "") -> "object":
     toml = textwrap.dedent(f"""
         [identity]
         name = "Testra"
-        home_dir = "{home}"
+        home_dir = "{home.as_posix()}"
 
         [model]
         backend = "ollama"

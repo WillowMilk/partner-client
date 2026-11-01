@@ -43,7 +43,7 @@ def home(tmp_path):
     toml.write_text(f"""
 [identity]
 name = "Testa"
-home_dir = "{tmp_path}"
+home_dir = "{tmp_path.as_posix()}"
 seed_file = "seed.md"
 profile_files = ["Memory/identity.md"]
 
@@ -97,7 +97,7 @@ def test_door_rides_even_a_bare_home_with_every_flag_off(tmp_path):
     toml.write_text(f"""
 [identity]
 name = "Bare"
-home_dir = "{tmp_path}"
+home_dir = "{tmp_path.as_posix()}"
 seed_file = "missing-seed.md"
 profile_files = []
 

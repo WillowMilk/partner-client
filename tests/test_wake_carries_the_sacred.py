@@ -32,7 +32,7 @@ def home(tmp_path):
     toml.write_text(f"""
 [identity]
 name = "Testa"
-home_dir = "{tmp_path}"
+home_dir = "{tmp_path.as_posix()}"
 seed_file = "seed.md"
 profile_files = ["Memory/identity.md"]
 

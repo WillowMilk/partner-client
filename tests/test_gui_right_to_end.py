@@ -35,7 +35,7 @@ def _build_api(tmp_path) -> GuiApi:
         f"""
         [identity]
         name = "Testra"
-        home_dir = "{home}"
+        home_dir = "{home.as_posix()}"
 
         [model]
         backend = "ollama"

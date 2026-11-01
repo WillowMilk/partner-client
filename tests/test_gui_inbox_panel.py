@@ -42,7 +42,7 @@ def _build_api_with_hub(tmp_path) -> GuiApi:
     toml = textwrap.dedent(f"""
         [identity]
         name = "Testra"
-        home_dir = "{home}"
+        home_dir = "{home.as_posix()}"
 
         [model]
         backend = "ollama"
